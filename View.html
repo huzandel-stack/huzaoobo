@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Хуза ИИ — Ответ</title>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css">
+<style>
+:root {
+  --bg: #0a0a0f;
+  --surface: #13131a;
+  --surface2: #1c1c27;
+  --surface3: #252535;
+  --border: rgba(255,255,255,0.07);
+  --border2: rgba(255,255,255,0.12);
+  --text: #f0f0ff;
+  --text2: rgba(240,240,255,0.55);
+  --text3: rgba(240,240,255,0.3);
+  --accent: #5b6ef5;
+  --accent2: #7c8ff7;
+  --green: #34d399;
+  --red: #f87171;
+}
+* { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+body { font-family:'Manrope',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; }
+
+/* LOADER */
+#loader { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:16px; background:var(--bg); z-index:999; }
+.spin { width:44px; height:44px; border:3px solid var(--border2); border-top-color:var(--accent); border-radius:50%; animation:_spin .8s linear infinite; }
+@keyframes _spin { to { transform:rotate(360deg); } }
+#loader p { font-size:14px; color:var(--text3); font-weight:600; }
+
+/* ERROR */
+#error { position:fixed; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center; gap:16px; background:var(--bg); text-align:center; padding:30px; z-index:999; }
+#error .ico { font-size:52px; }
+#error h2 { font-size:20px; font-weight:800; color:var(--red); }
+#error p { font-size:13px; color:var(--text3); line-height:1.7; }
+#error button { margin-top:8px; padding:12px 28px; background:linear-gradient(135deg,#5b6ef5,#9b59b6); border:none; border-radius:12px; color:#fff; font-size:14px; font-weight:700; font-family:inherit; cursor:pointer; }
+
+/* PAGE */
+#page { display:none; }
+
+/* HEADER */
+.hdr { display:flex; align-items:center; gap:10px; padding:10px 14px; background:rgba(19,19,26,.97); border-bottom:1px solid var(--border); position:sticky; top:0; z-index:10; }
+.hdr-logo { width:36px; height:36px; border-radius:11px; background:linear-gradient(135deg,#5b6ef5,#9b59b6); display:flex; align-items:center; justify-content:center; flex-shrink:0; font-size:18px; }
+.hdr-info { flex:1; min-width:0; }
+.hdr-title { font-size:14px; font-weight:800; }
+.hdr-sub { font-size:10px; color:var(--text3); margin-top:1px; }
+.hdr-copy { padding:8px 14px; background:linear-gradient(135deg,#5b6ef5,#9b59b6); border:none; border-radius:10px; color:#fff; font-size:12px; font-weight:700; font-family:inherit; cursor:pointer; flex-shrink:0; transition:all .2s; }
+.hdr-copy.ok { background:linear-gradient(135deg,#34d399,#059669); }
+
+/* BADGE */
+.badge { display:inline-flex; align-items:center; gap:7px; margin:12px 14px 0; padding:5px 12px 5px 8px; background:var(--surface2); border:1px solid var(--border2); border-radius:20px; font-size:11px; font-weight:700; color:var(--text2); }
+.badge-dot { width:22px; height:22px; border-radius:6px; background:linear-gradient(135deg,#5b6ef5,#9b59b6); display:flex; align-items:center; justify-content:center; font-size:11px; flex-shrink:0; }
+.badge-time { color:var(--text3); }
+
+/* CARD */
+.card { margin:10px 8px 0; background:var(--surface); border:1px solid var(--border); border-radius:16px; border-bottom-left-radius:4px; overflow:hidden; box-shadow:0 4px 24px rgba(0,0,0,.3); }
+
+/* ── BUBBLE — точно как в мини-аппе ── */
+.bubble { padding:14px 14px 16px; font-size:14px; line-height:1.55; color:var(--text); word-break:break-word; }
+.bubble p { margin-bottom:6px; }
+.bubble p:last-child { margin-bottom:0; }
+.bubble strong { color:#fff; font-weight:700; }
+.bubble em { font-style:italic; color:var(--text2); }
+.bubble h2 { font-size:20px; font-weight:800; margin:16px 0 8px; color:#fff; }
+.bubble h3 { font-size:17px; font-weight:800; margin:14px 0 6px; color:#fff; }
+.bubble h4 { font-size:14px; font-weight:700; margin:12px 0 5px; color:var(--accent2); }
+.bubble h2:first-child,.bubble h3:first-child,.bubble h4:first-child { margin-top:0; }
+.bubble ul,.bubble ol { margin:6px 0 10px; padding-left:0; list-style:none; }
+.bubble li { padding:3px 0 3px 22px; line-height:1.6; margin-bottom:3px; position:relative; }
+.bubble ul li::before { content:'◆'; position:absolute; left:0; color:var(--accent); font-size:7px; top:9px; }
+.bubble ol { counter-reset:li; }
+.bubble ol li::before { counter-increment:li; content:counter(li); position:absolute; left:0; background:var(--accent); color:#fff; width:15px; height:15px; border-radius:4px; font-size:9px; font-weight:800; display:flex; align-items:center; justify-content:center; top:4px; }
+.bubble code { background:rgba(255,255,255,.08); padding:1px 5px; border-radius:4px; font-size:12px; font-family:'SF Mono','Fira Code',monospace; color:var(--accent2); }
+.bubble pre code { background:none; padding:0; color:inherit; }
+
+/* ── CODE BLOCKS — идентично мини-аппу ── */
+.code-wrapper { position:relative; margin:12px 0; border-radius:14px; overflow:hidden; width:100%; box-shadow:0 4px 20px rgba(0,0,0,.4); border:1px solid rgba(91,110,245,.2); }
+.code-header { display:flex; justify-content:space-between; align-items:center; background:linear-gradient(135deg,#0d0e1a,#161726); padding:9px 14px; font-size:11px; color:rgba(255,255,255,.5); font-family:"SF Mono","Fira Code",monospace; border-bottom:1px solid rgba(91,110,245,.15); }
+.code-header > span:first-child { display:inline-flex; align-items:center; gap:6px; font-weight:700; letter-spacing:.5px; color:var(--accent2); }
+.code-header > span:first-child::before { content:''; display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent); box-shadow:0 0 6px rgba(91,110,245,.6); }
+.copy-btn { background:rgba(91,110,245,.12); border:1px solid rgba(91,110,245,.25); color:rgba(255,255,255,.6); padding:4px 12px; border-radius:6px; font-size:11px; cursor:pointer; transition:all .15s; font-family:'Manrope',sans-serif; white-space:nowrap; }
+.copy-btn:active,.copy-btn.copied { background:rgba(52,211,153,.2); color:#34d399; border-color:rgba(52,211,153,.3); }
+.code-wrapper pre { margin:0 !important; border-radius:0 0 14px 14px !important; background:#0f1117 !important; padding:20px !important; overflow-x:auto !important; overflow-y:visible !important; white-space:pre !important; word-break:normal !important; word-wrap:normal !important; font-size:15px !important; line-height:1.85 !important; max-height:none !important; }
+.code-wrapper pre code { font-family:"SF Mono","Fira Code","Consolas",monospace !important; font-size:15px !important; white-space:pre !important; word-break:normal !important; word-wrap:normal !important; display:block; }
+
+/* ── TABLES — идентично мини-аппу ── */
+.table-wrap { width:100%; overflow-x:auto; margin:12px 0; border-radius:12px; border:1px solid rgba(91,110,245,.25); box-shadow:0 2px 12px rgba(0,0,0,.2); }
+.bubble table { border-collapse:collapse; width:100%; min-width:340px; font-size:13.5px; }
+.bubble th { background:linear-gradient(135deg,#3d4fd4,#5b6ef5); color:#fff; padding:11px 16px; text-align:left; font-weight:700; font-size:13px; letter-spacing:.3px; white-space:nowrap; }
+.bubble td { padding:10px 16px; border-bottom:1px solid rgba(255,255,255,.08); color:var(--text); line-height:1.6; vertical-align:top; font-size:13px; }
+.bubble tr:nth-child(even) td { background:rgba(91,110,245,.07); }
+.bubble tr:last-child td { border-bottom:none; }
+.bubble tr:hover td { background:rgba(255,255,255,.05); transition:background .15s; }
+
+/* KATEX */
+.katex { font-size:1em !important; }
+.katex-display { overflow-x:auto; padding:4px 0; }
+
+/* RUBY */
+ruby { ruby-align:center; }
+rt { font-size:9px; color:var(--accent2); }
+
+/* ACTIONS */
+.actions { display:flex; gap:7px; flex-wrap:wrap; padding:10px 14px 12px; border-top:1px solid var(--border); background:var(--surface2); }
+.act-btn { display:inline-flex; align-items:center; gap:4px; padding:6px 12px; border-radius:9px; font-size:11px; font-weight:700; cursor:pointer; font-family:inherit; border:1px solid var(--border2); background:var(--surface3); color:var(--text2); transition:all .15s; }
+.act-btn:active { opacity:.7; }
+.act-tg  { background:rgba(42,171,238,.12); border-color:rgba(42,171,238,.3);  color:#2aabee; }
+.act-bot { background:rgba(91,110,245,.15); border-color:rgba(91,110,245,.35); color:var(--accent2); }
+.pb { padding-bottom:40px; }
+</style>
+</head>
+<body>
+
+<div id="loader"><div class="spin"></div><p>Загружаю ответ...</p></div>
+
+<div id="error">
+  <div class="ico">⏳</div>
+  <h2>Ссылка устарела</h2>
+  <p>Ответы хранятся в памяти сервера.<br>При перезапуске Railway они удаляются.<br><br>Запроси ответ заново в боте.</p>
+  <button onclick="window.open('https://t.me/iihuzandelpiibot','_blank')">🤖 Открыть бота</button>
+</div>
+
+<div id="page">
+  <div class="hdr">
+    <div class="hdr-logo">🤖</div>
+    <div class="hdr-info">
+      <div class="hdr-title">Хуза ИИ</div>
+      <div class="hdr-sub" id="hdrSub">Ответ нейросети</div>
+    </div>
+    <button class="hdr-copy" id="copyBtn" onclick="copyAll()">📋 Копировать</button>
+  </div>
+
+  <div class="badge">
+    <div class="badge-dot">🤖</div>
+    <span id="badgeModel">ИИ</span>
+    <span class="badge-time" id="badgeTime"></span>
+  </div>
+
+  <div class="card">
+    <div class="bubble" id="content"></div>
+    <div class="actions">
+      <button class="act-btn" onclick="copyAll()">📋 Копировать текст</button>
+      <button class="act-btn act-tg" onclick="shareTg()">✈️ Поделиться</button>
+      <button class="act-btn act-bot" onclick="window.open('https://t.me/iihuzandelpiibot','_blank')">🤖 Бот</button>
+    </div>
+  </div>
+  <div class="pb"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"></script>
+<script>
+function escHtml(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+/* ══════════════════════════════════════════════════════
+   formatText — ТОЧНАЯ КОПИЯ функции из мини-аппа
+══════════════════════════════════════════════════════ */
+function formatText(rawText) {
+  let text = (rawText || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const ph = {};  // все плейсхолдеры
+  let pi = 0;
+  const save = (s) => { const k = '\x00P'+(pi++)+'\x00'; ph[k]=s; return k; };
+  const restore = (t) => { Object.keys(ph).forEach(k => { t = t.split(k).join(ph[k]); }); return t; };
+
+  // ── ШАГ 1: сохраняем блоки кода ──────────────────────────────
+  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const raw = code.trim();
+    const esc = escHtml(raw);
+    const lbl = lang ? lang.toUpperCase() : 'CODE';
+    return save(
+      `<div class="code-wrapper">` +
+        `<div class="code-header"><span>${lbl}</span>` +
+        `<button class="copy-btn" onclick="copyCode(this)">Копировать</button></div>` +
+        `<pre><code class="${lang?'language-'+lang:''}" data-raw="${esc.replace(/"/g,'&quot;')}">${esc}</code></pre>` +
+      `</div>`
+    );
+  });
+
+  // ── ШАГ 2: сохраняем ВСЕ формулы ────────────────────────────
+  // \[...\] и \(...\)
+  text = text.replace(/\\\[[\s\S]+?\\\]/g,  m => save(m));
+  text = text.replace(/\\\([\s\S]+?\\\)/g,  m => save(m));
+  // $$...$$
+  text = text.replace(/\$\$([\s\S]+?)\$\$/g, m => save(m));
+  // $...$ инлайн (не пустые, без переноса внутри)
+  text = text.replace(/\$([^\$\r\n\x00]{1,500}?)\$/g, m => save(m));
+
+  // ── ШАГ 3: таблицы Markdown ──────────────────────────────────
+  // Находим блоки строк с |...|
+  text = text.replace(/((?:[ \t]*\|.+\n?)+)/g, (match) => {
+    const lines = match.trim().split('\n').map(l => l.trim()).filter(l => l.includes('|'));
+    if (lines.length < 2) return match;
+    const isSep = l => /^[\|\s\-:]+$/.test(l) && l.includes('-');
+    const sepLine = lines.find(l => isSep(l));
+    const aligns = sepLine
+      ? sepLine.split('|').filter((_,i,a)=>i>0&&i<a.length-1).map(c=>{
+          const cc=c.trim();
+          if(/^:-+:$/.test(cc)) return 'center';
+          if(/^-+:$/.test(cc))  return 'right';
+          return 'left';
+        })
+      : [];
+    const dataLines = lines.filter(l => !isSep(l));
+    if (dataLines.length < 1) return match;
+    let html = '<div class="table-wrap"><table>';
+    dataLines.forEach((line, ri) => {
+      const cells = line.replace(/^\|/,'').replace(/\|$/,'').split('|');
+      const tag = ri === 0 ? 'th' : 'td';
+      html += '<tr>' + cells.map((c,ci) => {
+        const a = aligns[ci] ? ` style="text-align:${aligns[ci]}"` : '';
+        return `<${tag}${a}>${c.trim()}</${tag}>`;
+      }).join('') + '</tr>';
+    });
+    html += '</table></div>';
+    return save(html);
+  });
+
+  // ── ШАГ 4: лингвистическая разметка ─────────────────────────
+  text = text.replace(/([А-Яа-яЁёa-zA-Z]+)\[([^\]]{1,120})\]/g,
+    (_, w, n) => `<ruby>${escHtml(w)}<rt>${escHtml(n)}</rt></ruby>`);
+  text = text.replace(/==(.+?)==/g, '<span style="text-decoration:underline;color:#7c8ff7">$1</span>');
+  text = text.replace(/~~(.+?)~~/g, '<span style="text-decoration:underline double #f87171">$1</span>');
+  text = text.replace(/___(.+?)___/g, '<span style="text-decoration:underline dotted #34d399">$1</span>');
+  text = text.replace(/#([^#\n]+)#/g, '<span style="text-decoration:underline dotted #a78bfa">$1</span>');
+
+  // ── ШАГ 5: bold / italic ─────────────────────────────────────
+  text = text.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+  text = text.replace(/\*\*(.+?)\*\*/g,     '<strong>$1</strong>');
+  text = text.replace(/\*(.+?)\*/g,         '<em>$1</em>');
+
+  // ── ШАГ 6: заголовки ─────────────────────────────────────────
+  text = text.replace(/^####\s+(.+)$/gm, '<h4>$1</h4>');
+  text = text.replace(/^###\s+(.+)$/gm,  '<h4>$1</h4>');
+  text = text.replace(/^##\s+(.+)$/gm,   '<h3>$1</h3>');
+  text = text.replace(/^#\s+(.+)$/gm,    '<h2>$1</h2>');
+
+  // ── ШАГ 7: списки ────────────────────────────────────────────
+  text = text.replace(/^[-*•]\s+(.+)$/gm, '<li>$1</li>');
+  text = text.replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>');
+  // нумерованные
+  text = text.replace(/^\d+\.\s+(.+)$/gm, '<li>$1</li>');
+
+  // ── ШАГ 8: inline code ───────────────────────────────────────
+  text = text.replace(/`([^`\n]+)`/g, (_, c) => `<code>${escHtml(c)}</code>`);
+
+  // ── ШАГ 9: переносы строк → <br> ─────────────────────────────
+  text = text.replace(/\n/g, '<br>');
+
+  // ── ШАГ 10: восстанавливаем всё ──────────────────────────────
+  text = restore(text);
+
+  return text;
+}
+
+/* copyCode — точная копия из мини-аппа */
+function copyCode(btn) {
+  const codeEl = btn.closest(".code-wrapper").querySelector("code");
+  const raw = codeEl ? (codeEl.getAttribute("data-raw") || codeEl.innerText) : "";
+  const decoded = raw.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"');
+  navigator.clipboard.writeText(decoded).then(() => {
+    btn.textContent = "✓ Скопировано";
+    btn.classList.add("copied");
+    setTimeout(() => { btn.textContent = "Копировать"; btn.classList.remove("copied"); }, 2000);
+  }).catch(() => {});
+}
+
+var _raw = '';
+function copyAll() {
+  navigator.clipboard.writeText(_raw).then(() => {
+    const b = document.getElementById('copyBtn');
+    b.textContent = '✅ Скопировано'; b.classList.add('ok');
+    setTimeout(() => { b.textContent = '📋 Копировать'; b.classList.remove('ok'); }, 2000);
+  }).catch(() => {});
+}
+function shareTg() {
+  window.open('https://t.me/share/url?url=' + encodeURIComponent(location.href) + '&text=' + encodeURIComponent('🤖 Ответ ИИ'), '_blank');
+}
+
+function showEl(id) {
+  ['loader','error','page'].forEach(x => {
+    const e = document.getElementById(x);
+    if (e) e.style.display = 'none';
+  });
+  const el = document.getElementById(id);
+  if (el) el.style.display = (id === 'error' ? 'flex' : 'block');
+}
+
+function renderData(data) {
+  _raw = data.text || '';
+  document.getElementById('badgeModel').textContent = data.model || 'ИИ';
+  document.getElementById('badgeTime').textContent  = data.time ? '· ' + data.time : '';
+  document.getElementById('hdrSub').textContent     = (data.model || 'ИИ') + (data.time ? ' · ' + data.time : '');
+  document.title = 'Хуза ИИ · ' + (data.model || 'ИИ');
+
+  const el = document.getElementById('content');
+  el.innerHTML = formatText(_raw);
+
+  // highlight.js — точно как в мини-аппе
+  try {
+    el.querySelectorAll('pre code').forEach(block => {
+      try { hljs.highlightElement(block); } catch(e) {}
+    });
+  } catch(e) {}
+
+  // KaTeX — точно как в мини-аппе
+  try {
+    renderMathInElement(el, {
+      delimiters: [
+        { left:'$$', right:'$$', display:true  },
+        { left:'$',  right:'$',  display:false },
+        { left:'\\(', right:'\\)', display:false },
+        { left:'\\[', right:'\\]', display:true  }
+      ],
+      throwOnError: false
+    });
+  } catch(e) {}
+
+  // Сброс текста кнопок после hljs
+  el.querySelectorAll('.copy-btn').forEach(btn => { btn.textContent = 'Копировать'; });
+
+  showEl('page');
+}
+
+var _kt = setTimeout(() => showEl('error'), 6000);
+function _ok(fn) { clearTimeout(_kt); try { fn(); } catch(e) { showEl('error'); } }
+
+function _init() {
+  if (window.__VIEW_DATA__ && window.__VIEW_DATA__.text) {
+    return _ok(() => renderData(window.__VIEW_DATA__));
+  }
+  const id = new URLSearchParams(location.search).get('id');
+  if (!id) { clearTimeout(_kt); showEl('error'); return; }
+  fetch(location.origin + '/api/answer/' + id)
+    .then(r => r.json())
+    .then(d => { if (d && d.ok && d.text) _ok(() => renderData(d)); else _ok(() => showEl('error')); })
+    .catch(() => { clearTimeout(_kt); showEl('error'); });
+}
+
+if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', _init); }
+else { _init(); }
+</script>
+</body>
+</html>
