@@ -320,7 +320,7 @@ async def generate_music_elevenlabs(prompt: str, lang: str = "en") -> bytes:
 # URLs — переопределяй через переменные окружения
 MINI_APP_URL  = os.getenv("MINI_APP_URL",  "https://fe3od1337-eng.github.io/miniapp.html/")
 VIEW_BASE_URL = os.getenv("VIEW_BASE_URL", "https://fe3od1337-eng.github.io/miniapp.html/View.html")
-API_BASE_URL  = os.getenv("API_BASE_URL",  "https://huzabot123-production.up.railway.app")
+API_BASE_URL  = os.getenv("API_BASE_URL",  "huzaoobo-production.up.railway.app")
 
 # Имя бота — меняй без правки кода
 BOT_NAME = os.getenv("BOT_NAME", "ХУЗА")
