@@ -223,6 +223,57 @@ user_music_models: dict = {}  # uid -> "suno" | "elevenlabs"
 disabled_music_models: set = set()
 disabled_music_styles: set = set()
 
+# ══════════════════════════════════════════════════════════════
+# 🔒 ПЕРЕКЛЮЧАТЕЛИ СЕРВИСОВ — admin может вкл/выкл одной кнопкой
+# ══════════════════════════════════════════════════════════════
+# True = сервис ВКЛЮЧЁН и доступен пользователям
+# False = сервис ВЫКЛЮЧЕН (токены/квота закончились), пользователи получат сообщение
+SERVICE_ENABLED = {
+    "image":    True,   # 🎨 Генерация картинок
+    "video":    True,   # 🎬 Генерация видео
+    "music":    True,   # 🎵 Генерация музыки
+    "report":   True,   # 📝 Доклады/Рефераты
+    "pptx":     True,   # 🎞 Презентации
+}
+
+SERVICE_LABELS = {
+    "image":  "🎨 Генерация картинок",
+    "video":  "🎬 Генерация видео",
+    "music":  "🎵 Генерация музыки",
+    "report": "📝 Доклады/Рефераты",
+    "pptx":   "🎞 Презентации",
+}
+
+SERVICE_DISABLED_MSG = {
+    "image":  "🚫 <b>Генерация картинок временно недоступна</b>\n\nСервис временно отключён, скоро вернётся! Попробуй позже.",
+    "video":  "🚫 <b>Генерация видео временно недоступна</b>\n\nСервис временно отключён, скоро вернётся! Попробуй позже.",
+    "music":  "🚫 <b>Генерация музыки временно недоступна</b>\n\nСервис временно отключён, скоро вернётся! Попробуй позже.",
+    "report": "🚫 <b>Генерация докладов временно недоступна</b>\n\nСервис временно отключён, скоро вернётся! Попробуй позже.",
+    "pptx":   "🚫 <b>Генерация презентаций временно недоступна</b>\n\nСервис временно отключён, скоро вернётся! Попробуй позже.",
+}
+
+def is_service_on(key: str) -> bool:
+    """Проверить включён ли сервис."""
+    return SERVICE_ENABLED.get(key, True)
+
+async def check_service(msg_or_cb, key: str) -> bool:
+    """Проверяет сервис и отправляет сообщение если выключен. Возвращает True если включён."""
+    if is_service_on(key):
+        return True
+    text = SERVICE_DISABLED_MSG.get(key, "🚫 Сервис временно недоступен.")
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🏠 Главная", callback_data="back_home")
+    ]])
+    if isinstance(msg_or_cb, Message):
+        await msg_or_cb.answer(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        try:
+            await msg_or_cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+        except Exception:
+            await msg_or_cb.message.answer(text, parse_mode="HTML", reply_markup=kb)
+        await msg_or_cb.answer()
+    return False
+
 def get_music_model(uid: int) -> str:
     chosen = user_music_models.get(uid, MUSIC_MODEL_DEFAULT)
     # Если выбранная модель отключена — берём первую доступную
@@ -1297,6 +1348,7 @@ async def db_save_bot_settings():
         "limits_pro_day":      str(LIMITS["pro_day"]),
         "limits_img_month":    str(LIMITS["img_month"]),
         "limits_reset_h":      str(LIMITS["reset_h"]),
+        "service_enabled":     _j.dumps(SERVICE_ENABLED),
     }
     try:
         async with db_pool.acquire() as conn:
@@ -1338,6 +1390,11 @@ async def db_load_bot_settings():
                 LIMITS["img_month"] = int(v)
             elif k == "limits_reset_h":
                 LIMITS["reset_h"] = int(v)
+            elif k == "service_enabled":
+                loaded_se = _j.loads(v)
+                for skey in SERVICE_ENABLED:
+                    if skey in loaded_se:
+                        SERVICE_ENABLED[skey] = bool(loaded_se[skey])
         logging.info("✅ Настройки бота загружены из БД")
     except Exception as e:
         logging.warning(f"db_load_bot_settings: {e}")
@@ -4399,6 +4456,8 @@ async def menu_video_cb(callback: CallbackQuery):
     if not has_active_sub(uid):
         if not await require_subscription(callback):
             return
+    if not await check_service(callback, "video"):
+        return
     if not can_video(uid):
         li = get_limits_info(uid)
         if li["video_max"] == 0:
@@ -4728,6 +4787,16 @@ async def cb_video_again(callback: CallbackQuery):
 # ==================================================================
 
 
+def report_titlepage_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📄 С титульным листом", callback_data="report_title_yes"),
+            InlineKeyboardButton(text="📝 Без титульного листа", callback_data="report_title_no"),
+        ],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="back_home")],
+    ])
+
+
 def report_type_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -4787,6 +4856,8 @@ def report_confirm_kb() -> InlineKeyboardMarkup:
 async def rb_report(message: Message):
     uid = message.from_user.id
     if not await require_subscription(message):
+        return
+    if not await check_service(message, "report"):
         return
     report_states[uid] = {}
     await message.answer(
@@ -4881,17 +4952,50 @@ async def report_model_cb(callback: CallbackQuery):
     model_label = _MODEL_LABELS.get(model_key, MODELS.get(model_key, {}).get("label", model_key))
     report_states[uid]["model"]       = model_key
     report_states[uid]["model_label"] = model_label
-    admin_await[uid] = {"action": "report_author"}
     await callback.message.edit_text(
         f"🤖 <b>Модель: {model_label}</b>\n\n"
-        "👤 Введи <b>имя автора</b> (ФИО / псевдоним):\n\n"
-        "<i>Или нажми «Пропустить», если не нужно</i>",
+        "📄 <b>Нужен титульный лист?</b>\n\n"
+        "<i>Титульный лист — стандартное оформление с названием работы, автором и годом</i>",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⏭ Пропустить", callback_data="report_skip_author")],
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="back_home")],
-        ])
+        reply_markup=report_titlepage_kb()
     )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.in_({"report_title_yes", "report_title_no"}))
+async def report_title_cb(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid not in report_states:
+        report_states[uid] = {}
+    with_title = callback.data == "report_title_yes"
+    report_states[uid]["with_title"] = with_title
+    title_label = "📄 С титульным листом" if with_title else "📝 Без титульного листа"
+    if with_title:
+        # Спрашиваем автора
+        admin_await[uid] = {"action": "report_author"}
+        await callback.message.edit_text(
+            f"✅ <b>{title_label}</b>\n\n"
+            "👤 Введи <b>имя автора</b> (ФИО / псевдоним):\n\n"
+            "<i>Или нажми «Пропустить», если не нужно</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⏭ Пропустить", callback_data="report_skip_author")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="back_home")],
+            ])
+        )
+    else:
+        # Без титульника — сразу к теме
+        report_states[uid]["author"] = ""
+        admin_await[uid] = {"action": "report_topic"}
+        await callback.message.edit_text(
+            f"✅ <b>{title_label}</b>\n\n"
+            "✏️ Напиши <b>тему</b> доклада/реферата:\n\n"
+            "<i>Пример: «Первая помощь при ожогах»</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="back_home"),
+            ]])
+        )
     await callback.answer()
 
 
@@ -4923,6 +5027,8 @@ async def report_skip_wishes_cb(callback: CallbackQuery):
     pages = state.get("pages", 5)
     model_label = state.get("model_label", "Claude Opus")
     author = state.get("author", "")
+    with_title = state.get("with_title", True)
+    title_str = "📄 Есть" if with_title else "📝 Нет"
     confirm_text = (
         f"📋 <b>Подтверди параметры работы:</b>\n\n"
         f"📄 Тип: <b>{type_label}</b>\n"
@@ -4930,6 +5036,7 @@ async def report_skip_wishes_cb(callback: CallbackQuery):
         f"📏 Объём: <b>{pages} стр.</b>\n"
         f"🤖 Модель: <b>{model_label}</b>\n"
         f"👤 Автор: <b>{author if author else chr(8212)}</b>\n"
+        f"📑 Титульный лист: <b>{title_str}</b>\n"
         f"✍️ Пожелания: <b>—</b>\n\n"
         f"💎 Стоимость: <b>3 продвинутых запроса</b>"
     )
@@ -5042,7 +5149,7 @@ async def _do_generate_report(msg_or_message, uid: int, state: dict, is_cb: bool
     max_tok = min(max(pages * 400, 800), 6000)
     wishes_block = f"\n\nПОЖЕЛАНИЯ ЗАКАЗЧИКА (обязательно учти):\n{wishes}" if wishes else ""
 
-    # ОБЖ тема — особый промпт с практическими примерами
+    # Определяем тематические особенности
     topic_lower_r = topic.lower()
     is_obzh = any(w in topic_lower_r for w in [
         'обж', 'безопасность жизнедеятельности', 'чрезвычайн', 'первая помощь',
@@ -5051,55 +5158,100 @@ async def _do_generate_report(msg_or_message, uid: int, state: dict, is_cb: bool
         'скулшутинг', 'вооружённ', 'вооружен', 'нападен', 'угроз',
         'насили', 'буллинг', 'дтп', 'авари', 'безопасн', 'опасн',
         'яд', 'отравлен', 'ожог', 'утоплен', 'молни', 'гроз',
+        'взрыв', 'химическ', 'радиац', 'биологическ', 'эпидем',
+        'цунами', 'урага', 'торнадо', 'лавин', 'паводк',
     ])
 
     if rtype == "doklad":
-        system_prompt = (
-            f"Ты — профессиональный автор школьных и студенческих докладов. "
-            f"У тебя есть доступ к актуальным данным из интернета — используй веб-поиск "
-            f"чтобы найти свежие факты, статистику и примеры по теме.\n\n"
-            f"🇷🇺 ОБЯЗАТЕЛЬНО: Весь доклад пиши ТОЛЬКО на русском языке, "
-            f"независимо от темы и источников. "
-            f"Даже если тема иностранная — переводи всё на русский.\n\n"
-            f"ПРАВИЛА:\n"
-            f"• Весь текст — только на русском языке (это абсолютное требование)\n"
-            f"• Используй актуальные данные из интернета\n"
-            f"• Без воды и общих фраз\n"
-            f"• Факты, примеры, конкретика в каждом разделе\n"
-            f"• Стиль: чёткий, информативный, для устного выступления в классе/группе\n"
-            f"• БЕЗ 'цели', 'задач', 'актуальности' — это доклад, не реферат\n"
-            f"• Иностранные термины пиши с переводом: например, 'скулшутинг (вооружённое нападение на школу)'\n\n"
-            f"Пишешь ТОЛЬКО сам текст доклада на русском языке, без вступлений и комментариев."
-        )
+        if is_obzh:
+            system_prompt = (
+                "Ты — опытный преподаватель ОБЖ (Основы Безопасности Жизнедеятельности) "
+                "и автор школьных докладов. Ты пишешь доклады, которые РЕАЛЬНО ПОМОГАЮТ "
+                "в экстремальных ситуациях — с конкретными алгоритмами действий, цифрами, "
+                "реальными случаями и практическими советами.\n\n"
+                "🇷🇺 ОБЯЗАТЕЛЬНО: Весь текст пиши ТОЛЬКО на русском языке.\n\n"
+                "━━━ СТАНДАРТЫ КАЧЕСТВА ДЛЯ ОБЖ ━━━\n\n"
+                "ОБЯЗАТЕЛЬНЫЕ ЭЛЕМЕНТЫ КАЖДОГО РАЗДЕЛА:\n"
+                "✅ Реальные случаи и примеры (с конкретными деталями: когда, где, что произошло)\n"
+                "✅ Алгоритм действий по шагам: Шаг 1 → Шаг 2 → Шаг 3...\n"
+                "✅ Статистика (количество жертв, процент выживаемости, частота случаев)\n"
+                "✅ Типичные ОШИБКИ людей и ПОЧЕМУ они опасны\n"
+                "✅ Конкретные признаки опасности (как распознать угрозу)\n"
+                "✅ Что НЕЛЬЗЯ делать — с объяснением последствий\n\n"
+                "СТРУКТУРА КАЖДОГО РАЗДЕЛА:\n"
+                "1. Суть явления/угрозы (2-3 предложения с определением)\n"
+                "2. Реальный случай или статистика\n"
+                "3. Как распознать опасность (признаки)\n"
+                "4. Алгоритм действий по шагам (минимум 5-7 шагов)\n"
+                "5. Типичные ошибки и их последствия\n"
+                "6. Профилактика и подготовка\n\n"
+                "ЗАПРЕЩЕНО:\n"
+                "• Общие фразы типа 'важно соблюдать безопасность'\n"
+                "• Советы без конкретики ('немедленно позвоните' — куда? какой номер?)\n"
+                "• Перечисления без объяснения ЗАЧЕМ\n"
+                "• Повторение одного и того же разными словами\n\n"
+                "Пишешь ТОЛЬКО текст доклада. Без вступлений типа 'Конечно!' и комментариев."
+            )
+        else:
+            system_prompt = (
+                "Ты — профессиональный автор школьных и студенческих докладов. "
+                "У тебя есть доступ к актуальным данным из интернета — используй веб-поиск "
+                "чтобы найти свежие факты, статистику и примеры по теме.\n\n"
+                "🇷🇺 ОБЯЗАТЕЛЬНО: Весь доклад пиши ТОЛЬКО на русском языке, "
+                "независимо от темы и источников.\n\n"
+                "ПРАВИЛА КАЧЕСТВЕННОГО ДОКЛАДА:\n"
+                "• Только русский язык (абсолютное требование)\n"
+                "• Используй актуальные данные из интернета\n"
+                "• Каждый раздел — конкретные факты, цифры, примеры (не общие слова)\n"
+                "• Стиль: чёткий, информативный, подходит для устного выступления\n"
+                "• БЕЗ 'целей', 'задач', 'актуальности' — это доклад, не реферат\n"
+                "• Иностранные термины с переводом в скобках\n"
+                "• Каждый раздел завершается кратким итогом\n\n"
+                "Пишешь ТОЛЬКО сам текст доклада, без вступлений и комментариев."
+            )
+
         # Строим структуру разделов по количеству страниц
         sections = ""
         num_sections = max(1, pages - 1)
         for i in range(1, num_sections + 1):
             sections += f"## [Раздел {i}: название по теме]\n"
-        user_prompt = (
-            f"Напиши доклад на тему: «{topic}»\n\n"
-            f"🇷🇺 ОБЯЗАТЕЛЬНО: пиши ТОЛЬКО на русском языке!\n\n"
-            f"⚠️ СТРОГИЙ ЛИМИТ: максимум {target_words} слов ({pages} страниц). "
-            f"Это ЖЁСТКОЕ ограничение — не превышай! "
-            f"При объёме 1 страница — пиши около 280 слов, не больше.\n\n"
-            f"СТРУКТУРА:\n"
-            f"## Введение\n"
-            f"Краткое введение в тему (2-3 абзаца)\n\n"
-            f"{sections}\n"
-            f"## Заключение\n"
-            f"Итоги и выводы\n\n"
-            f"{wishes_block}\n\n"
-            f"Каждый раздел — минимум 2 содержательных абзаца с конкретными фактами."
-            + ("""
 
-ДОПОЛНИТЕЛЬНЫЕ ТРЕБОВАНИЯ ДЛЯ ОБЖ:
-• Обязательно включи реальные жизненные ситуации и примеры
-• Конкретные практические действия (алгоритм шагов: 1, 2, 3...)
-• Статистику или данные по теме
-• Типичные ошибки и как их избежать
-• Структура: Введение → Основная часть → Практические примеры → Заключение
-""" if is_obzh else "")
-        )
+        if is_obzh:
+            user_prompt = (
+                f"Напиши доклад по ОБЖ на тему: «{topic}»\n\n"
+                f"🇷🇺 ОБЯЗАТЕЛЬНО: пиши ТОЛЬКО на русском языке!\n\n"
+                f"⚠️ ЛИМИТ: максимум {target_words} слов ({pages} страниц).\n\n"
+                f"ОБЯЗАТЕЛЬНАЯ СТРУКТУРА:\n"
+                f"## Введение\n"
+                f"(Что это за угроза/ситуация, насколько распространена, статистика)\n\n"
+                f"{sections}\n"
+                f"В КАЖДОМ разделе ОБЯЗАТЕЛЬНО:\n"
+                f"— Реальный задокументированный случай (место, год, что произошло)\n"
+                f"— Алгоритм действий (нумерованный список шагов)\n"
+                f"— Распространённые ошибки людей (с последствиями)\n"
+                f"— Конкретные цифры: телефоны экстренных служб (112, 01, 02, 03), "
+                f"время до прибытия помощи, температуры, расстояния и т.д.\n\n"
+                f"## Заключение\n"
+                f"(Ключевые правила выживания — краткий список)\n\n"
+                f"{wishes_block}\n\n"
+                f"ВАЖНО: Каждый раздел должен быть ПРАКТИЧЕСКИ ПОЛЕЗНЫМ. "
+                f"Читатель должен знать ЧТО ДЕЛАТЬ в реальной ситуации."
+            )
+        else:
+            user_prompt = (
+                f"Напиши доклад на тему: «{topic}»\n\n"
+                f"🇷🇺 ОБЯЗАТЕЛЬНО: пиши ТОЛЬКО на русском языке!\n\n"
+                f"⚠️ СТРОГИЙ ЛИМИТ: максимум {target_words} слов ({pages} страниц). "
+                f"Не превышай!\n\n"
+                f"СТРУКТУРА:\n"
+                f"## Введение\n"
+                f"Краткое введение в тему (2-3 абзаца)\n\n"
+                f"{sections}\n"
+                f"## Заключение\n"
+                f"Итоги и выводы\n\n"
+                f"{wishes_block}\n\n"
+                f"Каждый раздел — минимум 2 содержательных абзаца с конкретными фактами."
+            )
     else:
         system_prompt = (
             f"Ты — профессиональный автор научных рефератов с доступом к актуальным данным из интернета. "
@@ -5207,7 +5359,9 @@ async def _do_generate_report(msg_or_message, uid: int, state: dict, is_cb: bool
             pass
 
         # Создаём .docx файл
-        path = await _create_report_docx(topic, rtype_label, pages, model_label, ans, uid, author=state.get("author", ""))
+        path = await _create_report_docx(topic, rtype_label, pages, model_label, ans, uid,
+                                          author=state.get("author", ""),
+                                          with_title=state.get("with_title", True))
 
         total_secs = int(asyncio.get_event_loop().time() - _start)
         caption = (
@@ -5245,7 +5399,7 @@ async def _do_generate_report(msg_or_message, uid: int, state: dict, is_cb: bool
         await send_fn(f"❌ Ошибка при создании {rtype_label.lower()}а: {str(e)[:300]}")
 
 
-async def _create_report_docx(topic: str, rtype_label: str, pages: int, model_label: str, content: str, uid: int, author: str = "") -> str:
+async def _create_report_docx(topic: str, rtype_label: str, pages: int, model_label: str, content: str, uid: int, author: str = "", with_title: bool = True) -> str:
     """Создаёт красиво оформленный .docx файл с докладом/рефератом."""
     from docx import Document as _Doc
     from docx.shared import Pt, RGBColor, Cm, Inches
@@ -5269,72 +5423,73 @@ async def _create_report_docx(topic: str, rtype_label: str, pages: int, model_la
     normal.font.name = 'Times New Roman'
     normal.font.size = Pt(14)
 
-    # Титульная страница
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run("МИНИСТЕРСТВО ОБРАЗОВАНИЯ")
-    r.bold = True; r.font.size = Pt(12)
-    r.font.name = 'Times New Roman'
+    if with_title:
+        # Титульная страница
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run("МИНИСТЕРСТВО ОБРАЗОВАНИЯ")
+        r.bold = True; r.font.size = Pt(12)
+        r.font.name = 'Times New Roman'
 
-    doc.add_paragraph()
-    doc.add_paragraph()
-    doc.add_paragraph()
+        doc.add_paragraph()
+        doc.add_paragraph()
+        doc.add_paragraph()
 
-    p2 = doc.add_paragraph()
-    p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r2 = p2.add_run(rtype_label.upper())
-    r2.bold = True; r2.font.size = Pt(20)
-    r2.font.name = 'Times New Roman'
-    r2.font.color.rgb = RGBColor(0x19, 0x50, 0xB4)
+        p2 = doc.add_paragraph()
+        p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r2 = p2.add_run(rtype_label.upper())
+        r2.bold = True; r2.font.size = Pt(20)
+        r2.font.name = 'Times New Roman'
+        r2.font.color.rgb = RGBColor(0x19, 0x50, 0xB4)
 
-    doc.add_paragraph()
+        doc.add_paragraph()
 
-    p3 = doc.add_paragraph()
-    p3.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r3 = p3.add_run("на тему:")
-    r3.font.size = Pt(14); r3.font.name = 'Times New Roman'
+        p3 = doc.add_paragraph()
+        p3.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r3 = p3.add_run("на тему:")
+        r3.font.size = Pt(14); r3.font.name = 'Times New Roman'
 
-    p4 = doc.add_paragraph()
-    p4.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r4 = p4.add_run(f"«{topic}»")
-    r4.bold = True; r4.font.size = Pt(16)
-    r4.font.name = 'Times New Roman'
-    r4.font.color.rgb = RGBColor(0x1a, 0x1a, 0x2e)
+        p4 = doc.add_paragraph()
+        p4.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r4 = p4.add_run(f"«{topic}»")
+        r4.bold = True; r4.font.size = Pt(16)
+        r4.font.name = 'Times New Roman'
+        r4.font.color.rgb = RGBColor(0x1a, 0x1a, 0x2e)
 
-    doc.add_paragraph()
-    doc.add_paragraph()
-    doc.add_paragraph()
-    doc.add_paragraph()
+        doc.add_paragraph()
+        doc.add_paragraph()
+        doc.add_paragraph()
+        doc.add_paragraph()
 
-    if author:
-        p5 = doc.add_paragraph()
-        p5.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-        # Определение пола по окончанию имени (русская морфология)
-        def _detect_gender(name: str) -> str:
-            """Возвращает 'Выполнила' или 'Выполнил' по имени."""
-            if not name:
+        if author:
+            p5 = doc.add_paragraph()
+            p5.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+            # Определение пола по окончанию имени (русская морфология)
+            def _detect_gender(name: str) -> str:
+                """Возвращает 'Выполнила' или 'Выполнил' по имени."""
+                if not name:
+                    return "Выполнил"
+                first_name = name.strip().split()[0].lower()
+                # Женские окончания в русском языке
+                female_endings = ('а', 'я', 'ия', 'ья', 'ея', 'ка', 'на', 'га', 'та', 'ра', 'ла', 'са')
+                if any(first_name.endswith(e) for e in female_endings):
+                    return "Выполнила"
                 return "Выполнил"
-            first_name = name.strip().split()[0].lower()
-            # Женские окончания в русском языке
-            female_endings = ('а', 'я', 'ия', 'ья', 'ея', 'ка', 'на', 'га', 'та', 'ра', 'ла', 'са')
-            if any(first_name.endswith(e) for e in female_endings):
-                return "Выполнила"
-            return "Выполнил"
-        performed_word = _detect_gender(author)
-        r5 = p5.add_run(f"{performed_word}: {author}")
-        r5.font.size = Pt(14); r5.font.name = 'Times New Roman'
-        r5.font.color.rgb = RGBColor(0x1a, 0x1a, 0x2e)
+            performed_word = _detect_gender(author)
+            r5 = p5.add_run(f"{performed_word}: {author}")
+            r5.font.size = Pt(14); r5.font.name = 'Times New Roman'
+            r5.font.color.rgb = RGBColor(0x1a, 0x1a, 0x2e)
 
-    doc.add_paragraph()
-    doc.add_paragraph()
+        doc.add_paragraph()
+        doc.add_paragraph()
 
-    p6 = doc.add_paragraph()
-    p6.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r6 = p6.add_run(_dt.datetime.now().strftime("%Y"))
-    r6.font.size = Pt(14); r6.font.name = 'Times New Roman'
+        p6 = doc.add_paragraph()
+        p6.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r6 = p6.add_run(_dt.datetime.now().strftime("%Y"))
+        r6.font.size = Pt(14); r6.font.name = 'Times New Roman'
 
-    # Разрыв страницы
-    doc.add_page_break()
+        # Разрыв страницы
+        doc.add_page_break()
 
     # Парсим содержимое и добавляем в документ
     lines = content.split('\n')
@@ -5881,6 +6036,26 @@ _RU_TO_EN_PHOTO = {
     "расширени": "expansion territory map empire",
     "геополитик": "geopolitics world map strategy power",
     "сверхдержав": "superpower military parade nuclear",
+    # ОБЖ / Безопасность
+    "обж": "emergency safety rescue first aid",
+    "безопасност": "safety protection security rescue",
+    "чрезвычайн": "emergency rescue firefighters disaster",
+    "первая помощь": "first aid medical emergency CPR",
+    "пожарн": "fire firefighters rescue emergency",
+    "эвакуац": "evacuation people emergency exit",
+    "землетрясен": "earthquake disaster destruction rescue",
+    "наводнен": "flood disaster rescue emergency",
+    "выживан": "survival nature emergency outdoor",
+    "гражданская оборона": "civil defense emergency shelters",
+    "террор": "terrorism security police defense",
+    "ожог": "burn injury medical treatment hospital",
+    "отравлен": "poison medical emergency treatment",
+    "утоплен": "drowning rescue lifeguard water safety",
+    "дтп": "car accident road emergency rescue",
+    "авари": "accident emergency rescue disaster",
+    "спасател": "rescue team emergency responders",
+    "мчс": "emergency rescue ministry firefighters Russia",
+    "скорая": "ambulance medical emergency first aid",
     # Бизнес
     "бизнес": "business office professionals meeting",
     "финанс": "finance money investment banking",
@@ -8139,6 +8314,22 @@ def create_html_presentation(pptx_data: dict, theme_key: str = "dark_blue", pexe
         "психологи": "psychology mind wellness",
         "мотивац": "motivation success achievement",
         "лидерств": "leadership success team",
+        # ОБЖ / Безопасность
+        "обж": "emergency safety rescue firefighters",
+        "безопасност": "safety security rescue protection",
+        "чрезвычайн": "emergency disaster rescue responders",
+        "первая помощь": "first aid medical emergency CPR",
+        "пожарн": "fire emergency firefighters rescue",
+        "эвакуац": "evacuation emergency exit people",
+        "землетрясен": "earthquake disaster rescue emergency",
+        "наводнен": "flood disaster water rescue emergency",
+        "выживан": "survival outdoor emergency wilderness",
+        "гражданская оборона": "civil defense emergency shelters bunker",
+        "ожог": "medical burn treatment hospital emergency",
+        "отравлен": "poison medical emergency treatment hospital",
+        "дтп": "car accident road emergency rescue police",
+        "авари": "accident emergency rescue disaster response",
+        "спасател": "rescue team emergency responders firefighters",
     }
 
     def _normalize_kw(kw: str) -> str:
@@ -10498,6 +10689,8 @@ async def menu_report_cb(callback: CallbackQuery):
     uid = callback.from_user.id
     if not await require_subscription(callback):
         return
+    if not await check_service(callback, "report"):
+        return
     await menu_report_screen(callback)
 
 
@@ -10535,6 +10728,8 @@ async def menu_report_screen(msg_or_cb):
 async def menu_pptx_cb(callback: CallbackQuery):
     uid = callback.from_user.id
     if not await require_subscription(callback):
+        return
+    if not await check_service(callback, "pptx"):
         return
     pptx_states[uid] = {}
     admin_await[uid] = {"action": "pptx_topic"}
@@ -10816,6 +11011,8 @@ async def menu_chat(callback: CallbackQuery):
 @dp.callback_query(F.data == "menu_imggen")
 async def menu_imggen(callback: CallbackQuery):
     if not await require_subscription(callback):
+        return
+    if not await check_service(callback, "image"):
         return
     imggen_text = (
         "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
@@ -11297,6 +11494,7 @@ async def show_admin_panel(msg_or_cb):
          InlineKeyboardButton(text="🧪 Тест моделей",   callback_data="admin_test_models")],
         [InlineKeyboardButton(text="🔑 API ключи",       callback_data="admin_apikeys")],
         [InlineKeyboardButton(text="⚙️ Дополнительно",  callback_data="admin_extra")],
+        [InlineKeyboardButton(text="🔌 Сервисы вкл/выкл", callback_data="admin_services")],
         [InlineKeyboardButton(text="🗑 Сброс памяти",   callback_data="admin_reset_memory")],
         [InlineKeyboardButton(text="🏠 Главная",         callback_data="back_home")],
     ])
@@ -12166,6 +12364,60 @@ async def admin_reset_memory(callback: CallbackQuery):
     for u in user_memory:
         user_memory[u] = deque(maxlen=20)
     await callback.answer("✅ Память всех пользователей очищена!", show_alert=True)
+
+
+# ══════════════════════════════════════════════════════════════
+# 🔌 ADMIN: ПЕРЕКЛЮЧАТЕЛИ СЕРВИСОВ
+# ══════════════════════════════════════════════════════════════
+
+@dp.callback_query(F.data == "admin_services")
+async def admin_services_panel(callback: CallbackQuery):
+    """Панель включения/выключения сервисов генерации."""
+    uid = callback.from_user.id
+    if uid not in ADMIN_IDS:
+        return await callback.answer("❌ Нет доступа", show_alert=True)
+
+    lines = ["🔌 <b>УПРАВЛЕНИЕ СЕРВИСАМИ</b>\n\n"]
+    for key, label in SERVICE_LABELS.items():
+        status = "✅ ВКЛ" if SERVICE_ENABLED[key] else "❌ ВЫКЛ"
+        lines.append(f"{status}  {label}")
+
+    text = "\n".join(lines) + "\n\n<i>Нажми кнопку чтобы переключить сервис</i>"
+
+    rows = []
+    for key, label in SERVICE_LABELS.items():
+        icon = "✅" if SERVICE_ENABLED[key] else "❌"
+        rows.append([InlineKeyboardButton(
+            text=f"{icon} {label}",
+            callback_data=f"admin_svc_toggle_{key}"
+        )])
+    rows.append([InlineKeyboardButton(text="◀️ Назад в панель", callback_data="menu_admin")])
+
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML",
+                                          reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML",
+                                       reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_svc_toggle_"))
+async def admin_svc_toggle(callback: CallbackQuery):
+    """Переключить конкретный сервис."""
+    uid = callback.from_user.id
+    if uid not in ADMIN_IDS:
+        return await callback.answer("❌ Нет доступа", show_alert=True)
+    key = callback.data.replace("admin_svc_toggle_", "")
+    if key not in SERVICE_ENABLED:
+        return await callback.answer("❌ Неизвестный сервис", show_alert=True)
+    SERVICE_ENABLED[key] = not SERVICE_ENABLED[key]
+    new_status = "✅ ВКЛЮЧЁН" if SERVICE_ENABLED[key] else "❌ ВЫКЛЮЧЕН"
+    label = SERVICE_LABELS.get(key, key)
+    asyncio.create_task(db_save_bot_settings())
+    await callback.answer(f"{label} — {new_status}", show_alert=True)
+    # Обновляем панель
+    await admin_services_panel(callback)
 
 
 @dp.callback_query(F.data == "admin_broadcast")
@@ -13356,22 +13608,25 @@ async def handle_text(message: Message):
             report_states[uid]["wishes"] = wishes
             state = report_states[uid]
             type_label = state.get("type_label", "Доклад")
-            topic2 = state.get("topic", "\u2014")
+            topic2 = state.get("topic", "—")
             pages2 = state.get("pages", 5)
             model_label2 = state.get("model_label", "Claude Opus")
             author2 = state.get("author", "")
-            author_line2 = f"   \u2022 Автор: <b>{author2}</b>\n" if author2 else ""
+            with_title2 = state.get("with_title", True)
+            author_line2 = f"   • Автор: <b>{author2}</b>\n" if author2 else ""
+            title_str2 = "📄 Есть" if with_title2 else "📝 Нет"
             wishes_short = wishes[:80] + ("..." if len(wishes) > 80 else "")
             await message.answer(
-                f"\U0001f4cb <b>Настройки {type_label}:</b>\n"
-                f"   \u2022 Тип: <b>{type_label}</b>\n"
-                f"   \u2022 Тема: <b>\xab{topic2[:60]}{'..' if len(topic2)>60 else ''}\xbb</b>\n"
-                f"   \u2022 Объём: <b>{pages2} страниц</b>\n"
-                f"   \u2022 Модель: <b>{model_label2}</b>\n"
+                f"📋 <b>Настройки {type_label}:</b>\n"
+                f"   • Тип: <b>{type_label}</b>\n"
+                f"   • Тема: <b>«{topic2[:60]}{'..' if len(topic2)>60 else ''}»</b>\n"
+                f"   • Объём: <b>{pages2} страниц</b>\n"
+                f"   • Модель: <b>{model_label2}</b>\n"
                 f"{author_line2}"
-                f"   \u2022 Пожелания: <b>{wishes_short}</b>\n\n"
-                f"\U0001f4b8 Стоимость: <b>3 продвинутых запроса</b>\n\n"
-                f"\U0001f680 Всё верно? Нажми <b>\xabСоздать доклад\xbb</b>:",
+                f"   • Титульный лист: <b>{title_str2}</b>\n"
+                f"   • Пожелания: <b>{wishes_short}</b>\n\n"
+                f"💎 Стоимость: <b>3 продвинутых запроса</b>\n\n"
+                f"🚀 Всё верно? Нажми <b>«Создать доклад»</b>:",
                 parse_mode="HTML",
                 reply_markup=report_confirm_kb()
             )
@@ -14121,6 +14376,8 @@ def music_confirm_kb(has_lyrics: bool = False) -> InlineKeyboardMarkup:
 async def menu_music(callback: CallbackQuery):
     uid = callback.from_user.id
     _init_limits(uid)
+    if not await check_service(callback, "music"):
+        return
     sub_active   = has_active_sub(uid)
     li = get_limits_info(uid)
     music_left = max(0, li["music_max"] - li["music_used"])
