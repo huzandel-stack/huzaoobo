@@ -10276,27 +10276,50 @@ async def pptx_gen_plan_cb(callback: CallbackQuery):
                 ["Выводы и заключение"]
             )[:slides_n]
 
+        # Подгоняем список под нужное количество слайдов
+        if len(slides_list) < slides_n:
+            # Дополняем если не хватает
+            while len(slides_list) < slides_n:
+                slides_list.append(f"Дополнительный раздел {len(slides_list)}")
+        elif len(slides_list) > slides_n:
+            # Обрезаем если лишние
+            slides_list = slides_list[:slides_n]
+
         pptx_states[uid]["plan"] = slides_list
         await wait.delete()
 
-        # Показываем план
+        # ── Показываем план ──────────────────────────────────────────
+        # Короткие названия для кнопок (максимум 15 символов)
         plan_display = "\n".join(f"{i+1}. {t}" for i, t in enumerate(slides_list))
         kb_rows = []
         for i in range(0, len(slides_list), 2):
             row = []
             for j in [i, i+1]:
                 if j < len(slides_list):
-                    short = slides_list[j][:20] + ("..." if len(slides_list[j]) > 20 else "")
-                    row.append(InlineKeyboardButton(text=f"{j+1}. {short}", callback_data=f"pptx_slide_view_{j}"))
+                    # Обрезаем название для кнопки до 15 символов
+                    name_short = slides_list[j]
+                    if len(name_short) > 15:
+                        # Берём первые значимые слова
+                        words = name_short.split()
+                        short = ""
+                        for w in words:
+                            if len(short) + len(w) + 1 <= 14:
+                                short = (short + " " + w).strip()
+                            else:
+                                break
+                        name_short = short + "…" if short else name_short[:14] + "…"
+                    row.append(InlineKeyboardButton(
+                        text=f"{j+1}. {name_short}",
+                        callback_data=f"pptx_slide_edit_{j}"
+                    ))
             kb_rows.append(row)
         kb_rows.append([InlineKeyboardButton(text="🔄 Перегенерировать план", callback_data="pptx_gen_plan")])
-        kb_rows.append([InlineKeyboardButton(text="✏️ Отредактировать план вручную", callback_data="pptx_edit_plan")])
-        kb_rows.append([InlineKeyboardButton(text="✅ Создать презентацию", callback_data="pptx_final_generate")])
+        kb_rows.append([InlineKeyboardButton(text="✅ Создать презентацию",   callback_data="pptx_final_generate")])
 
         await callback.message.answer(
-            f"🎞 <b>Тема: {topic[:50]}</b>\n\n"
-            f"<b>План презентации:</b>\n{plan_display}\n\n"
-            f"<i>Тезисы каждого слайда можно посмотреть по кнопкам ниже ↓</i>",
+            f"🎞 <b>Тема:</b> {topic[:60]}\n\n"
+            f"<b>📋 План ({slides_n} слайдов):</b>\n{plan_display}\n\n"
+            f"<i>✏️ Нажми на кнопку слайда чтобы изменить его название</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows)
         )
@@ -10336,6 +10359,105 @@ async def pptx_final_generate_cb(callback: CallbackQuery):
             [InlineKeyboardButton(text="🌐 HTML-презентация",   callback_data="pptx_type_html")],
         ])
     )
+
+
+# ══════════════════════════════════════════════════════════════
+# ✏️ РЕДАКТИРОВАНИЕ ОТДЕЛЬНОГО СЛАЙДА В ПЛАНЕ
+# ══════════════════════════════════════════════════════════════
+
+def _plan_kb(uid: int) -> InlineKeyboardMarkup:
+    """Возвращает клавиатуру плана для данного пользователя."""
+    slides_list = pptx_states.get(uid, {}).get("plan", [])
+    slides_n    = pptx_states.get(uid, {}).get("slides", len(slides_list))
+    kb_rows = []
+    for i in range(0, len(slides_list), 2):
+        row = []
+        for j in [i, i+1]:
+            if j < len(slides_list):
+                name = slides_list[j]
+                words = name.split()
+                short = ""
+                for w in words:
+                    if len(short) + len(w) + 1 <= 14:
+                        short = (short + " " + w).strip()
+                    else:
+                        break
+                name_short = (short + "…") if short and len(name) > 15 else name[:15]
+                row.append(InlineKeyboardButton(
+                    text=f"{j+1}. {name_short}",
+                    callback_data=f"pptx_slide_edit_{j}"
+                ))
+        kb_rows.append(row)
+    kb_rows.append([InlineKeyboardButton(text="🔄 Перегенерировать план", callback_data="pptx_gen_plan")])
+    kb_rows.append([InlineKeyboardButton(text="✅ Создать презентацию",   callback_data="pptx_final_generate")])
+    return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+@dp.callback_query(F.data.startswith("pptx_slide_edit_"))
+async def pptx_slide_edit_cb(callback: CallbackQuery):
+    """Показывает текущее название слайда и предлагает его изменить."""
+    uid = callback.from_user.id
+    try:
+        idx = int(callback.data.replace("pptx_slide_edit_", ""))
+    except ValueError:
+        return await callback.answer("❌ Ошибка", show_alert=True)
+
+    plan = pptx_states.get(uid, {}).get("plan", [])
+    if idx < 0 or idx >= len(plan):
+        return await callback.answer("❌ Слайд не найден", show_alert=True)
+
+    current_name = plan[idx]
+    admin_await[uid] = {"action": "pptx_rename_slide", "slide_idx": idx}
+
+    await callback.answer()
+    try:
+        await callback.message.edit_text(
+            f"✏️ <b>Редактировать слайд {idx + 1}</b>\n\n"
+            f"Текущее название:\n<i>«{current_name}»</i>\n\n"
+            f"Напиши новое название для этого слайда.\n"
+            f"<i>Содержание слайда будет сгенерировано по новому названию.</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="pptx_back_to_plan"),
+            ]])
+        )
+    except Exception:
+        await callback.message.answer(
+            f"✏️ <b>Слайд {idx + 1}:</b> <i>«{current_name}»</i>\n\nНапиши новое название:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="❌ Отмена", callback_data="pptx_back_to_plan"),
+            ]])
+        )
+
+
+@dp.callback_query(F.data == "pptx_back_to_plan")
+async def pptx_back_to_plan_cb(callback: CallbackQuery):
+    """Возврат к просмотру плана после отмены редактирования."""
+    uid = callback.from_user.id
+    admin_await.pop(uid, None)
+    state = pptx_states.get(uid, {})
+    plan  = state.get("plan", [])
+    topic = state.get("topic", "")
+    if not plan:
+        await callback.answer("❌ План не найден", show_alert=True)
+        return
+    plan_display = "\n".join(f"{i+1}. {t}" for i, t in enumerate(plan))
+    try:
+        await callback.message.edit_text(
+            f"🎞 <b>Тема:</b> {topic[:60]}\n\n"
+            f"<b>📋 План ({len(plan)} слайдов):</b>\n{plan_display}\n\n"
+            f"<i>✏️ Нажми на кнопку слайда чтобы изменить его название</i>",
+            parse_mode="HTML",
+            reply_markup=_plan_kb(uid)
+        )
+    except Exception:
+        await callback.message.answer(
+            f"📋 <b>План:</b>\n{plan_display}",
+            parse_mode="HTML",
+            reply_markup=_plan_kb(uid)
+        )
+    await callback.answer()
 
 
 async def _show_pptx_confirm(msg, uid):
@@ -13938,6 +14060,32 @@ async def handle_text(message: Message):
                 pptx_states[uid] = {}
             pptx_states[uid]["wishes"] = wishes
             await _show_pptx_confirm(message, uid)
+            return
+
+        if action == "pptx_rename_slide":
+            # Пользователь ввёл новое название для слайда
+            new_name = message.text.strip()
+            slide_idx = admin_await[uid].get("slide_idx", 0)
+            if uid not in pptx_states:
+                pptx_states[uid] = {}
+            plan = pptx_states[uid].get("plan", [])
+            if 0 <= slide_idx < len(plan):
+                old_name = plan[slide_idx]
+                plan[slide_idx] = new_name
+                pptx_states[uid]["plan"] = plan
+                topic = pptx_states[uid].get("topic", "")
+                plan_display = "\n".join(f"{i+1}. {t}" for i, t in enumerate(plan))
+                await message.answer(
+                    f"✅ <b>Слайд {slide_idx + 1} переименован!</b>\n"
+                    f"<s>{old_name}</s> → <b>{new_name}</b>\n\n"
+                    f"🎞 <b>Тема:</b> {topic[:60]}\n\n"
+                    f"<b>📋 План ({len(plan)} слайдов):</b>\n{plan_display}\n\n"
+                    f"<i>✏️ Нажми на кнопку слайда чтобы изменить его название</i>",
+                    parse_mode="HTML",
+                    reply_markup=_plan_kb(uid)
+                )
+            else:
+                await message.answer("❌ Слайд не найден", reply_markup=_plan_kb(uid))
             return
 
     # Проверка подписки для обычных пользователей
