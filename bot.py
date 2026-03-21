@@ -6206,6 +6206,22 @@ _PHOTO_DB = {
     "sniper":      [1917215,2058126,1437796,3396234,6447535,8159956,3651428,3722826],
     "security":    [2058126,1917215,313782,3396234,1486325,1437796,1693652,6447535],
     "conflict":    [2058126,1917215,3396234,1437796,6447535,8159956,3651428,1537220],
+    # ── ОБЖ / Безопасность / Полиция ─────────────────────────────────────────
+    "police":      [1653087,1697912,3153207,2896941,3777565,2828237,2896956,1653093],
+    "cop":         [1653087,1697912,3153207,2896941,3777565,2828237,2896956,1653093],
+    "detective":   [3153207,2896941,3777565,1653087,1697912,2828237,2896956,3153200],
+    "investigation":[3153207,2896941,3777565,1653087,1697912,2828237,2896956,3777558],
+    "surveillance":[1917215,2058126,3153207,2896941,3777565,1653087,1697912,2896956],
+    "checkpoint":  [1917215,2058126,2896941,3153207,1653087,1697912,3777565,2828237],
+    "teenager":    [3184465,3182812,1205651,289737,1438072,1350700,2422232,3184454],
+    "teenagers":   [3184465,3182812,1205651,289737,1438072,1350700,2422232,3184454],
+    "smartphone":  [3184465,3182812,699122,2741448,5081918,5082578,3184454,3182781],
+    "cybersecurity":[3182812,3184465,699122,2741448,5081918,5082578,3182781,3184454],
+    "prevention":  [1205651,289737,3184465,3182812,1438072,1350700,3777565,2896941],
+    "awareness":   [1205651,289737,3184465,3182812,1438072,1350700,2422232,1205652],
+    "counselor":   [3184465,3182812,1205651,289737,1438072,3777565,2896941,1350700],
+    "evacuate":    [2558679,2557399,2917989,2904389,3807571,3807572,2917983,2558686],
+    "evacuation":  [2558679,2557399,2917989,2904389,3807571,3807572,2917983,2558686],
     # ── История ───────────────────────────────────────────────────────────────
     "historical":  [313782,1486325,1693652,373912,2246476,325229,1693640,1486310],
     "ancient":     [1486325,313782,373912,1693652,325229,2246476,373892,1486310],
@@ -6855,10 +6871,57 @@ def _fallback_keywords(keyword: str, slide_title: str, topic: str) -> list[str]:
         'будущ': 'future vision innovation bright modern city',
         'цель': 'goal achievement target success planning',
         'метод': 'professional methods strategy planning diagram',
+        # ── ОБЖ / Безопасность / Терроризм (школьная тематика) ──────────
+        'террор': 'police security officers patrol checkpoint public safety',
+        'терроризм': 'police security checkpoint surveillance patrol urban',
+        'террористическ': 'police security checkpoint surveillance crowd control',
+        'экстремизм': 'police detective investigation security briefing',
+        'экстремальн': 'safety training emergency first responders drill',
+        'радикализ': 'school counselor psychologist student meeting prevention',
+        'вербовк': 'police detective investigation computer screen crime',
+        'вербовщик': 'police detective laptop investigation prevention',
+        'несовершеннолетних': 'school students teenagers classroom education',
+        'подростк': 'teenagers school students studying classroom modern',
+        'профилактик': 'school teacher students prevention education meeting',
+        'скулшутинг': 'school safety security drill evacuation students',
+        'нападени': 'police security guard building patrol protection',
+        'угроз': 'security police patrol building protection surveillance',
+        'безопасност': 'police security officers patrol public safety urban',
+        'гражданская оборона': 'emergency civil defense shelter people Russia',
+        'мвд': 'Russian police law enforcement officers uniform patrol',
+        'фсб': 'security intelligence law enforcement briefing uniform',
+        'правоохранительн': 'Russian police law enforcement officers patrol',
+        'правоохранители': 'police officers uniform patrol city security',
+        'горячая линия': 'phone call police helpline emergency assistance',
+        'социальн сет': 'teenager smartphone social media screen warning',
+        'интернет безопасн': 'teenager computer internet cyber safety screen',
+        'кибербезопасн': 'cyber security computer screen padlock data protection',
+        'профилактика экстремизм': 'school teacher students classroom prevention',
+        'первая помощь': 'first aid training kit bandage CPR medical',
+        'пожарн': 'firefighters rescue fire truck ladder emergency',
+        'эвакуац': 'evacuation crowd emergency exit building people',
+        'чрезвычайн': 'emergency rescue team disaster response professional',
+        'ожог': 'medical treatment burn wound bandage hospital care',
+        'отравлен': 'medical ambulance emergency treatment hospital care',
+        'дтп': 'road traffic accident police car crash emergency',
+        'авари': 'accident emergency police rescue scene road',
+        'спасател': 'rescue team emergency responders professional uniform',
+        'наводнен': 'flood rescue boat helicopter emergency people water',
+        'землетрясен': 'earthquake rescue survivors rubble emergency team',
+        'обж': 'safety training school students emergency awareness Russia',
+        'безопасность жизнедеятельности': 'safety education school students Russia training',
     }
 
     # Проверяем тему презентации и заголовок слайда
     combined = (topic + " " + slide_title).lower()
+
+    # Детектируем тему безопасности/ОБЖ — приоритет над военной
+    is_safety = any(w in combined for w in [
+        'террор', 'экстремизм', 'радикализ', 'вербовк', 'скулшутинг',
+        'обж', 'безопасност', 'пожарн', 'спасател', 'первая помощь',
+        'эвакуац', 'профилактик', 'несовершеннолетних', 'подростк',
+        'мвд', 'фсб', 'правоохранительн',
+    ])
 
     # Детектируем военную тему — приоритет над географическими keywords
     is_military = any(w in combined for w in [
@@ -6867,8 +6930,35 @@ def _fallback_keywords(keyword: str, slide_title: str, topic: str) -> list[str]:
         'расход', 'мощност', 'базовая нагруз', 'серийный', 'боеприпас',
     ])
 
+    # Если тема безопасности — добавляем правильные ключевые слова первыми
+    if is_safety:
+        # Подбираем ключевые слова по конкретному содержанию слайда
+        _slide_lower = slide_title.lower()
+        if any(w in _slide_lower for w in ['статистик', 'данн', 'цифр', 'показател']):
+            safety_kws = ["police statistics data analysis chart security", "crime prevention statistics infographic data"]
+        elif any(w in _slide_lower for w in ['метод', 'способ', 'вербовк', 'признак']):
+            safety_kws = ["detective investigation laptop evidence digital police", "teenager smartphone social media cyber awareness"]
+        elif any(w in _slide_lower for w in ['алгоритм', 'действи', 'как', 'что делать']):
+            safety_kws = ["police emergency hotline call help protection", "security training drill evacuation school students"]
+        elif any(w in _slide_lower for w in ['профилактик', 'защит', 'меры']):
+            safety_kws = ["school teacher students prevention education awareness", "parents children safety internet discussion home"]
+        elif any(w in _slide_lower for w in ['вывод', 'заключени', 'итог', 'результат']):
+            safety_kws = ["police community safety team school cooperation Russia", "school safety awareness students education Russia"]
+        elif any(w in _slide_lower for w in ['цитат', 'мнени', 'эксперт']):
+            safety_kws = ["police officer expert briefing press conference uniform", "security professional expert speaking audience"]
+        elif any(w in _slide_lower for w in ['подростк', 'несовершеннолетн', 'школьник']):
+            safety_kws = ["Russian school students teenagers classroom studying education", "teenagers group school friends outdoor Russia"]
+        elif any(w in _slide_lower for w in ['социальн сет', 'интернет', 'telegram', 'vk', 'онлайн']):
+            safety_kws = ["teenager smartphone social media screen warning parents", "cyber security internet safety teen screen alert"]
+        else:
+            safety_kws = ["police security patrol public safety urban Russia", "school safety security awareness students education Russia"]
+
+        for sk in reversed(safety_kws):
+            if sk not in candidates:
+                candidates.insert(0, sk)
+
     # Если военная тема — военные keywords идут ПЕРВЫМИ
-    if is_military:
+    elif is_military:
         military_kws = [
             "soldiers military training exercise armor field",
             "defense industry factory weapons production military",
@@ -6892,7 +6982,9 @@ def _fallback_keywords(keyword: str, slide_title: str, topic: str) -> list[str]:
         candidates.append(" ".join(topic_latin[:3]) + " professional")
 
     # 6. Универсальный безопасный фоллбек
-    if is_military:
+    if is_safety:
+        candidates.append("police security patrol public safety professional")
+    elif is_military:
         candidates.append("military defense army soldiers training")
     else:
         candidates.append("professional team modern workspace")
@@ -6911,15 +7003,12 @@ async def _fetch_photo(keyword: str, slide_title: str = "",
                        topic: str = "", slide_index: int = 0) -> bytes | None:
     """
     Загрузка тематического фото.
-
-    Приоритет источников (без API ключей):
-    1. Wikimedia API  — исторические/академические фото (первый приоритет)
-    2. Wikimedia API  — бесплатно, академические/исторические фото без ключа
-    3. Pixabay API    — если есть PIXABAY_KEY
-    4. Unsplash API   — если есть UNSPLASH_KEY
-    5. Pexels API     — если есть PEXELS_KEY
-    6. Pexels CDN     — статичные ID как ПОСЛЕДНИЙ резерв
-    7. Picsum         — крайний случай
+    Источники в порядке приоритета:
+    1. Pexels CDN (прямые ID) — для ОБЖ/безопасности ВСЕГДА первый
+    2. Wikimedia Commons — для исторических/академических тем (с фильтром)
+    3. Pexels / Pixabay / Unsplash API — если есть ключ
+    4. Pexels CDN (общий) — финальный резерв
+    5. Picsum — абсолютный резерв
     """
     import urllib.parse as _up
 
@@ -6931,8 +7020,57 @@ async def _fetch_photo(keyword: str, slide_title: str = "",
     unsplash_key = os.environ.get("UNSPLASH_KEY", "")
     pexels_key   = os.environ.get("PEXELS_KEY", "")
 
+    # ─── Определяем тему ──────────────────────────────────────────────
+    _kw_combined = (keyword + " " + slide_title + " " + topic).lower()
+
+    # Темы ОБЖ/безопасности — Wikimedia даёт нерелевантных иностранных полицейских
+    _is_safety = any(w in _kw_combined for w in [
+        "террор", "вербов", "подрост", "безопасн", "радикализ", "экстремизм",
+        "обж", "школ", "ученик", "профилакт", "несовершеннолет", "фсб", "мвд",
+        "teenager", "smartphone", "social media", "cyber", "cybersecurity",
+        "police", "security", "safety", "school", "student", "prevention",
+        "awareness", "firefi", "evacuation", "rescue", "first aid",
+    ])
+
+    # ─── Таблица Pexels ID для ОБЖ / безопасности ────────────────────
+    _SAFETY_PEXELS: dict[str, list[int]] = {
+        "school_class":     [1205651, 289737, 1438072, 1350700, 2422232, 1205652],
+        "teenager_phone":   [5081918, 699122, 2741448, 5082578, 3184465, 3182812],
+        "cyber_security":   [3182812, 3184465, 5081918, 699122,  2741448, 5082578],
+        "police_security":  [1653087, 1697912, 3153207, 2896941, 3777565, 2828237],
+        "statistics_chart": [590022,  210607,  159888,  3771110, 6801874, 669619],
+        "prevention_talk":  [3184465, 3182812, 1205651, 289737,  1438072, 3184454],
+        "expert_speaker":   [3184465, 3182812, 3182781, 3184454, 3182773, 3184419],
+        "conclusion":       [1205651, 289737,  3184465, 3182812, 1438072, 1350700],
+        "firefighters":     [3822850, 3822851, 1549280, 2047905, 1170979, 3822852],
+        "evacuation":       [2558679, 2557399, 2917989, 2904389, 3807571, 3807572],
+    }
+
+    def _pick_safety_id(kw: str, title: str, idx: int) -> int:
+        sl = (title + " " + kw).lower()
+        if any(w in sl for w in ['статистик', 'данн', 'цифр', 'процент', 'задержан']):
+            pool = _SAFETY_PEXELS["statistics_chart"]
+        elif any(w in sl for w in ['вербовк', 'соцсет', 'telegram', 'vk', 'social', 'smartphone', 'phone', 'teen']):
+            pool = _SAFETY_PEXELS["teenager_phone"]
+        elif any(w in sl for w in ['кибер', 'интернет', 'онлайн', 'digital', 'cyber', 'computer', 'screen']):
+            pool = _SAFETY_PEXELS["cyber_security"]
+        elif any(w in sl for w in ['полиц', 'мвд', 'фсб', 'правоохран', 'police', 'security', 'checkpoint']):
+            pool = _SAFETY_PEXELS["police_security"]
+        elif any(w in sl for w in ['алгоритм', 'действи', 'горячая линия', 'что делать', 'how to']):
+            pool = _SAFETY_PEXELS["prevention_talk"]
+        elif any(w in sl for w in ['пожарн', 'firefi', 'smoke', 'fire']):
+            pool = _SAFETY_PEXELS["firefighters"]
+        elif any(w in sl for w in ['эвакуац', 'evacuation', 'emergency']):
+            pool = _SAFETY_PEXELS["evacuation"]
+        elif any(w in sl for w in ['вывод', 'заключени', 'итог', 'conclusion', 'expert', 'цитат']):
+            pool = _SAFETY_PEXELS["conclusion"]
+        elif any(w in sl for w in ['подростк', 'школьник', 'класс', 'student', 'classroom']):
+            pool = _SAFETY_PEXELS["school_class"]
+        else:
+            pool = _SAFETY_PEXELS["prevention_talk"]
+        return pool[idx % len(pool)]
+
     async def _dl(url: str) -> bytes | None:
-        """Скачивает URL, следует редиректам, возвращает байты если фото > 15кб."""
         try:
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=15, connect=6)
@@ -6946,13 +7084,10 @@ async def _fetch_photo(keyword: str, slide_title: str = "",
                 ) as r:
                     if r.status == 200:
                         ct = r.headers.get("content-type", "")
-                        # LoremFlickr редиректит через несколько URL, конечный — JPEG
-                        # Проверяем либо content-type либо finalized URL
                         final_url = str(r.url) if hasattr(r, 'url') else url
                         is_image = (
                             "image" in ct
                             or final_url.endswith((".jpg",".jpeg",".png",".webp"))
-                            or "loremflickr.com" in url
                             or "pexels.com" in url
                             or "wikimedia.org" in url
                             or "picsum.photos" in url
@@ -6967,51 +7102,70 @@ async def _fetch_photo(keyword: str, slide_title: str = "",
             pass
         return None
 
+    # ═══════════════════════════════════════════════════════════════════
+    # ⚡ ПРИОРИТЕТ 1: Для ОБЖ/безопасности — СРАЗУ Pexels CDN
+    # Wikimedia для этих тем даёт POLIZEI, индийских полицейских и т.д.
+    # ═══════════════════════════════════════════════════════════════════
+    if _is_safety:
+        for _attempt_idx in range(3):
+            _sid = _pick_safety_id(keyword, slide_title, slide_index + _attempt_idx)
+            data = await _dl(_pex_cdn(_sid))
+            if data:
+                logging.info(f"📸 Safety Pexels CDN [{_sid}]: «{slide_title[:30]}»")
+                return data
+
+    # ═══════════════════════════════════════════════════════════════════
+    # ПРИОРИТЕТ 2: Wikimedia Commons (только для НЕ-ОБЖ тем)
+    # ═══════════════════════════════════════════════════════════════════
+    # Слова-фильтры: если они в названии файла — пропускаем
+    _BAD_WIKI_WORDS = [
+        "polizei", "india", "indian", "german", "deutsch",
+        "american", "usa", "british", "french", "turkish",
+        "china", "chinese", "japan", "korean", "arabic", "pakistan",
+        "bangladesh", "indonesia", "thailand", "iran",
+    ]
+
     for attempt, kw in enumerate(keywords_to_try[:4]):
         kw_clean = kw.strip()[:100]
         q_enc    = _up.quote(kw_clean)
-        # (LoremFlickr removed — unreliable for specific topics)
-        # ═══════════════════════════════════════════════════════════════
-        # 2. Wikimedia Commons Search API (бесплатно, без ключа)
-        # Отлично для исторических, научных, геополитических тем
-        # ═══════════════════════════════════════════════════════════════
-        try:
-            wiki_search = (
-                "https://commons.wikimedia.org/w/api.php"
-                f"?action=query&list=search&srsearch={q_enc}+photo"
-                f"&srnamespace=6&srlimit=15&format=json"
-            )
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=8)
-            ) as s:
-                async with s.get(
-                    wiki_search,
-                    headers={"User-Agent": "PresentationBot/2.0 (educational)"}
-                ) as r:
-                    if r.status == 200:
-                        js = await r.json()
-                        results = js.get("query", {}).get("search", [])
-                        # Берём только jpg/jpeg/png файлы
-                        img_files = [
-                            x for x in results
-                            if re.search(r'\.(jpg|jpeg|png)$', x.get("title",""), re.I)
-                        ]
-                        if img_files:
-                            # slide_index для разнообразия
-                            pick = img_files[slide_index % len(img_files)]
-                            fname = _up.quote(
-                                pick["title"].replace("File:", "").replace(" ", "_")
-                            )
-                            thumb_url = (
-                                "https://commons.wikimedia.org/wiki/Special:FilePath/"
-                                f"{fname}?width=1280"
-                            )
-                            data = await _dl(thumb_url)
-                            if data:
-                                logging.info(f"📸 Wikimedia: «{kw_clean[:40]}» [{len(data)//1024}кб]")
-                                return data
-        except Exception:
-            pass
+
+        if not _is_safety:
+            try:
+                wiki_search = (
+                    "https://commons.wikimedia.org/w/api.php"
+                    f"?action=query&list=search&srsearch={q_enc}+photo"
+                    f"&srnamespace=6&srlimit=20&format=json"
+                )
+                async with aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=8)
+                ) as s:
+                    async with s.get(
+                        wiki_search,
+                        headers={"User-Agent": "PresentationBot/2.0 (educational)"}
+                    ) as r:
+                        if r.status == 200:
+                            js = await r.json()
+                            results = js.get("query", {}).get("search", [])
+                            img_files = [
+                                x for x in results
+                                if re.search(r'\.(jpg|jpeg|png)$', x.get("title",""), re.I)
+                                and not any(b in x.get("title","").lower() for b in _BAD_WIKI_WORDS)
+                            ]
+                            if img_files:
+                                pick = img_files[slide_index % len(img_files)]
+                                fname = _up.quote(
+                                    pick["title"].replace("File:", "").replace(" ", "_")
+                                )
+                                thumb_url = (
+                                    "https://commons.wikimedia.org/wiki/Special:FilePath/"
+                                    f"{fname}?width=1280"
+                                )
+                                data = await _dl(thumb_url)
+                                if data:
+                                    logging.info(f"📸 Wikimedia: «{kw_clean[:40]}» [{len(data)//1024}кб]")
+                                    return data
+            except Exception:
+                pass
 
         # ═══════════════════════════════════════════════════════════════
         # 3. Pexels Search API (если есть PEXELS_KEY)
@@ -9094,13 +9248,21 @@ image_keyword — ПОИСКОВЫЙ ЗАПРОС для поиска фото. 
 ✅ "Napoleonic cavalry battle 1812 horses" | "Crimean War fortification soldiers"
 ✅ "Cold War nuclear bomb test explosion" | "space race rocket launch Sputnik"
 
-ОБЖ / БЕЗОПАСНОСТЬ (ГРАЖДАНСКАЯ — НЕ АМЕРИКАНСКИЕ ВОЕННЫЕ!):
-✅ "firefighters rescue building fire smoke" | "ambulance paramedics first aid emergency"
-✅ "evacuation crowd emergency exit building" | "earthquake rubble rescue workers"
-✅ "flood rescue boat helicopter disaster" | "police crowd security patrol"
-✅ "first aid cpr training mannequin" | "fire smoke alarm safety home"
-✅ "traffic accident car crash emergency" | "hazmat chemical suit workers"
-✅ "emergency shelter disaster relief people" | "school safety drill evacuation"
+ОБЖ / БЕЗОПАСНОСТЬ (ШКОЛЬНАЯ ТЕМАТИКА — НЕ АМЕРИКАНСКИЕ ВОЕННЫЕ!):
+✅ "police officers patrol security uniform street Russia" | "detective investigation laptop computer crime evidence"
+✅ "teenager smartphone social media screen warning parent" | "school safety drill evacuation students corridor"
+✅ "Russian police law enforcement uniform patrol building" | "security checkpoint ID verification public safety"
+✅ "counselor psychologist teenager student meeting prevention" | "parents children internet safety discussion home"
+✅ "crime prevention statistics data chart infographic" | "emergency hotline phone call police assistance"
+✅ "school teacher classroom students awareness education" | "cybersecurity internet safety padlock screen digital"
+
+⚠️ ДЛЯ КАЖДОГО СЛАЙДА ПОДБИРАЙ УНИКАЛЬНЫЙ keyword:
+- Слайд со статистикой → "police statistics crime data chart analysis"
+- Слайд с признаками → "detective investigation evidence laptop screen"
+- Слайд с методами вербовки → "teenager smartphone social media screen warning"
+- Слайд с действиями → "emergency phone call police help hotline"
+- Слайд с профилактикой → "school teacher students prevention awareness"
+- Слайд с выводами → "school safety police cooperation community education"
 
 БИЗНЕС / ФИНАНСЫ:
 ✅ "business meeting office professionals" | "stock market traders screens"
@@ -9275,26 +9437,28 @@ async def generate_pptx_structure_ai(topic: str, slides_count: int,
         "обж", "безопасност", "террор", "скулшутинг", "нападен", "угроз",
         "пожарн", "эвакуац", "чрезвычайн", "первая помощь", "ожог", "отравлен",
         "дтп", "авари", "спасател", "экстремальн", "выживан", "наводнен", "землетрясен",
+        "вербов", "радикализ", "экстремизм", "профилакт",
     ])
 
     if is_safety_topic:
         geo_rule = (
-            "⛔ ТЕМА ОБЖ/БЕЗОПАСНОСТЬ! image_keyword ОБЯЗАН быть из тематики безопасности. "
-            "ЗАПРЕЩЕНО: американские военные, US Army, NATO soldiers, Pentagon — это РОССИЙСКАЯ школьная тема!\n"
-            "ИСПОЛЬЗУЙ keywords: "
-            "'firefighters rescue emergency scene', "
-            "'ambulance paramedics first aid', "
-            "'evacuation crowd emergency exit building', "
-            "'police security patrol checkpoint crowd', "
-            "'earthquake destroyed building rescue workers', "
-            "'flood rescue boat emergency people', "
-            "'fire burning building emergency evacuation', "
-            "'first aid medical bandage treatment', "
-            "'traffic accident road police rescue', "
-            "'survival outdoor emergency wilderness nature', "
-            "'school safety security training drill', "
-            "'emergency shelter people disaster relief'. "
-            "Подбирай keyword под КОНКРЕТНОЕ СОДЕРЖАНИЕ каждого слайда!"
+            "⛔ ТЕМА ОБЖ/БЕЗОПАСНОСТЬ ДЛЯ РОССИЙСКОЙ ШКОЛЫ!\n"
+            "АБСОЛЮТНО ЗАПРЕЩЕНЫ keywords с: police, polizei, cop, officer, law enforcement "
+            "(они дают иностранных полицейских!), а также: US Army, NATO, American, German, Indian.\n\n"
+            "ОБЯЗАТЕЛЬНО используй ТОЛЬКО эти безопасные категории:\n"
+            "ДЛЯ ТЕМЫ ВЕРБОВКИ/ИНТЕРНЕТ: 'teenager smartphone social media dark', "
+            "'hacker dark monitor code screen', 'cybersecurity laptop warning alert', "
+            "'social network manipulation online trap', 'student computer screen danger'\n"
+            "ДЛЯ ТЕМЫ БЕЗОПАСНОСТИ: 'security camera surveillance cctv city', "
+            "'lock protection shield security concept', 'alert warning danger sign red'\n"
+            "ДЛЯ СТАТИСТИКИ: 'chart graph data analytics dashboard screen', "
+            "'statistics numbers report document'\n"
+            "ДЛЯ ШКОЛЫ/ПОДРОСТКОВ: 'students classroom school education learning', "
+            "'teenager young people group discussion', 'school corridor hallway students'\n"
+            "ДЛЯ ПОЖАРА: 'firefighters fire rescue building flame smoke'\n"
+            "ДЛЯ ПЕРВОЙ ПОМОЩИ: 'first aid kit medical bandage treatment hands'\n"
+            "ДЛЯ ЗАКЛЮЧЕНИЯ: 'protection shield family safe home concept'\n"
+            "Подбирай keyword к КОНКРЕТНОМУ содержанию слайда, используя ТОЛЬКО английские слова из примеров выше!"
         )
     elif is_military_topic:
         geo_rule = (
@@ -9453,9 +9617,27 @@ async def generate_html_structure_ai(
         "землетрясен", "наводнен", "выживан", "гражданская оборона", "террор",
         "скулшутинг", "нападен", "ожог", "отравлен", "дтп", "авари", "спасател",
         "взрыв", "химическ", "радиац", "цунами", "урага", "лавин", "паводк",
+        "вербовк", "радикализ", "экстремизм", "несовершеннолетн", "профилактик",
+    ])
+    is_terror_topic = any(w in topic_lower for w in [
+        "террор", "вербовк", "радикализ", "экстремизм", "скулшутинг",
     ])
 
-    if is_safety_topic:
+    if is_terror_topic:
+        geo_rule = (
+            "⛔ ТЕМА: ТЕРРОРИЗМ / ВЕРБОВКА ПОДРОСТКОВ — РОССИЙСКАЯ ШКОЛЬНАЯ ТЕМА!\n"
+            "АБСОЛЮТНО ЗАПРЕЩЕНО: US Army, American police, FBI, Pentagon, NATO soldiers, School shooting USA.\n"
+            "Используй РАЗНЫЕ уникальные keywords для КАЖДОГО слайда:\n"
+            "Для слайдов о статистике/угрозе: 'teenagers smartphone social media phone screen'\n"
+            "Для слайдов о методах вербовки: 'social media chat phone screen young person online'\n"
+            "Для слайдов о признаках: 'teacher student conversation school classroom Russia'\n"
+            "Для слайдов о действиях: 'parent teenager talk home family dialogue'\n"
+            "Для слайдов о полиции/МВД: 'police officer youth interview Russia crime prevention'\n"
+            "Для титульного: 'police security checkpoint crowd Russia city'\n"
+            "Для заключения: 'school assembly students safety awareness education Russia'\n"
+            "КАЖДЫЙ слайд = УНИКАЛЬНАЯ сцена! Не повторяй одинаковые keywords!"
+        )
+    elif is_safety_topic:
         geo_rule = (
             "⛔ ТЕМА ПО ОБЖ/БЕЗОПАСНОСТИ — ГРАЖДАНСКАЯ ТЕМА! "
             "АБСОЛЮТНО ЗАПРЕЩЕНО: американские военные, US Army, NATO soldiers, Pentagon, American police.\n"
