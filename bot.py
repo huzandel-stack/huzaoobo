@@ -5069,6 +5069,25 @@ async def report_generate_cb(callback: CallbackQuery):
     await callback.answer()
 
 
+def _hard_truncate_to_words(text: str, max_words: int) -> str:
+    """
+    Обрезает текст до max_words слов, при этом:
+    - Заканчивает на полном предложении (не обрывает на середине)
+    - Добавляет «...» если текст был обрезан
+    """
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    # Берём первые max_words слов
+    truncated = " ".join(words[:max_words])
+    # Ищем последнее законченное предложение
+    for end_char in ['. ', '.\n', '! ', '!\n', '? ', '?\n']:
+        last_pos = truncated.rfind(end_char)
+        if last_pos > len(truncated) * 0.7:  # конец должен быть в последних 30%
+            return truncated[:last_pos + 1].rstrip() + "\n\n**...**"
+    return truncated.rstrip() + "\n\n**...**"
+
+
 async def _do_generate_report(msg_or_message, uid: int, state: dict, is_cb: bool = False):
     """Генерирует доклад/реферат и отправляет как .docx файл."""
     topic       = state.get("topic", "")
@@ -5143,10 +5162,15 @@ async def _do_generate_report(msg_or_message, uid: int, state: dict, is_cb: bool
     _tick_task = asyncio.create_task(_tick(think_msg, _start))
 
     # Промпт для генерации
+    # 1 страница A4 ≈ 280 слов ≈ 420 токенов (русский язык)
     words_per_page = 280
-    target_words = pages * words_per_page
-    # Жёсткий лимит токенов: 1 стр ≈ 400 токенов, не даём ИИ писать больше
-    max_tok = min(max(pages * 400, 800), 6000)
+    target_words   = pages * words_per_page
+    max_target     = target_words + 30          # небольшой допуск
+    # Жёсткий лимит токенов — модели НЕ ДАЮТ писать больше чем нужно
+    # 1 стр = 420 токенов, минимум 500 токенов на маленькие доклады
+    max_tok = max(pages * 420, 500)
+    # Не более 4000 токенов даже для больших докладов (≈10 стр)
+    max_tok = min(max_tok, 4000)
     wishes_block = f"\n\nПОЖЕЛАНИЯ ЗАКАЗЧИКА (обязательно учти):\n{wishes}" if wishes else ""
 
     # Определяем тематические особенности
@@ -5218,82 +5242,70 @@ async def _do_generate_report(msg_or_message, uid: int, state: dict, is_cb: bool
 
         if is_obzh:
             user_prompt = (
+                f"⛔ СТОП-ПРАВИЛО №1 (важнее всего остального):\n"
+                f"МАКСИМУМ {target_words} СЛОВ. ЭТО ЖЁСТКИЙ ПОТОЛОК.\n"
+                f"Для {pages} стр. = {target_words} слов. Превышение НЕДОПУСТИМО.\n"
+                f"Когда достигнешь ~{target_words - 30} слов — немедленно пиши заключение и заканчивай.\n\n"
                 f"Напиши доклад по ОБЖ на тему: «{topic}»\n\n"
                 f"🇷🇺 ОБЯЗАТЕЛЬНО: пиши ТОЛЬКО на русском языке!\n\n"
-                f"⚠️ ЛИМИТ: максимум {target_words} слов ({pages} страниц).\n\n"
-                f"ОБЯЗАТЕЛЬНАЯ СТРУКТУРА:\n"
+                f"ОБЯЗАТЕЛЬНАЯ СТРУКТУРА (вписываясь в {target_words} слов):\n"
                 f"## Введение\n"
-                f"(Что это за угроза/ситуация, насколько распространена, статистика)\n\n"
+                f"(2-3 предложения: что это за угроза, насколько распространена)\n\n"
                 f"{sections}\n"
-                f"В КАЖДОМ разделе ОБЯЗАТЕЛЬНО:\n"
-                f"— Реальный задокументированный случай (место, год, что произошло)\n"
-                f"— Алгоритм действий (нумерованный список шагов)\n"
-                f"— Распространённые ошибки людей (с последствиями)\n"
-                f"— Конкретные цифры: телефоны экстренных служб (112, 01, 02, 03), "
-                f"время до прибытия помощи, температуры, расстояния и т.д.\n\n"
+                f"В КАЖДОМ разделе (кратко! — весь доклад = {target_words} слов):\n"
+                f"— Реальный случай (1-2 предложения)\n"
+                f"— Алгоритм действий (нумерованный, 4-6 шагов)\n"
+                f"— Телефоны экстренных служб: 112, 01, 02, 03\n"
+                f"— 1-2 типичных ошибки с последствиями\n\n"
                 f"## Заключение\n"
-                f"(Ключевые правила выживания — краткий список)\n\n"
-                f"{wishes_block}\n\n"
-                f"ВАЖНО: Каждый раздел должен быть ПРАКТИЧЕСКИ ПОЛЕЗНЫМ. "
-                f"Читатель должен знать ЧТО ДЕЛАТЬ в реальной ситуации."
+                f"(2-3 ключевых правила — краткий список)\n\n"
+                f"{wishes_block}"
             )
         else:
             user_prompt = (
+                f"⛔ СТОП-ПРАВИЛО №1 (важнее всего остального):\n"
+                f"МАКСИМУМ {target_words} СЛОВ. ЭТО ЖЁСТКИЙ ПОТОЛОК.\n"
+                f"Для {pages} стр. = {target_words} слов. Превышение НЕДОПУСТИМО.\n"
+                f"Когда достигнешь ~{target_words - 30} слов — немедленно пиши заключение и заканчивай.\n\n"
                 f"Напиши доклад на тему: «{topic}»\n\n"
                 f"🇷🇺 ОБЯЗАТЕЛЬНО: пиши ТОЛЬКО на русском языке!\n\n"
-                f"⚠️ СТРОГИЙ ЛИМИТ: максимум {target_words} слов ({pages} страниц). "
-                f"Не превышай!\n\n"
-                f"СТРУКТУРА:\n"
+                f"СТРУКТУРА (вписываясь в {target_words} слов):\n"
                 f"## Введение\n"
-                f"Краткое введение в тему (2-3 абзаца)\n\n"
+                f"Краткое введение (2-3 предложения)\n\n"
                 f"{sections}\n"
                 f"## Заключение\n"
-                f"Итоги и выводы\n\n"
+                f"Итоги (2-3 предложения)\n\n"
                 f"{wishes_block}\n\n"
-                f"Каждый раздел — минимум 2 содержательных абзаца с конкретными фактами."
+                f"Каждый раздел — конкретные факты, без воды."
             )
     else:
-        system_prompt = (
-            f"Ты — профессиональный автор научных рефератов с доступом к актуальным данным из интернета. "
-            f"Используй веб-поиск чтобы найти свежие исследования, статистику и источники по теме.\n\n"
-            f"🇷🇺 ОБЯЗАТЕЛЬНО: Весь реферат пиши ТОЛЬКО на русском языке, "
-            f"независимо от темы и источников. Иностранные термины переводи.\n\n"
-            f"Создаёшь рефераты уровня зачёта/экзамена в вузе — с чёткой научной логикой, "
-            f"теоретической базой и обоснованными выводами. "
-            f"Стиль: научный, академический, без разговорных оборотов.\n\n"
-
-            f"СТРОГИЕ ТРЕБОВАНИЯ К КАЧЕСТВУ:\n"
-            f"• Научный аппарат: актуальность, объект, предмет, цель, задачи, методы — во введении\n"
-            f"• ЗАПРЕЩЕНО: пересказ без анализа, вода, общие фразы\n"
-            f"• ОБЯЗАТЕЛЬНО: ссылки на теории, исследователей, данные\n"
-            f"• Каждый раздел с аналитическим выводом\n"
-            f"• Заключение: выводы по каждой задаче + общий итог + перспективы\n"
-            f"• Список литературы по ГОСТ Р 7.0.100-2018, минимум 7 источников\n\n"
-
-            f"ПИШЕШЬ ТОЛЬКО САМ РЕФЕРАТ. Без вводных фраз и финальных комментариев."
+        _limit_warning = (
+            f"\n\n⛔ ГЛАВНОЕ ПРАВИЛО: ПИШИ НЕ БОЛЕЕ {target_words} СЛОВ СУММАРНО. "
+            f"Когда приближаешься к {target_words - 30} словам — СРАЗУ ЗАКАНЧИВАЙ."
         )
+        system_prompt = (
+            f"Ты — автор научного реферата. Пишешь академично, по ГОСТ.\n"
+            f"🇷🇺 ТОЛЬКО РУССКИЙ ЯЗЫК. Стиль: научный, с источниками и анализом.\n"
+            f"Пишешь ТОЛЬКО реферат, без предисловий и комментариев."
+            + _limit_warning
+        )
+        # Количество глав для реферата
+        num_chapters = max(2, pages - 2)
+        chapters = "\n".join([
+            f"## Глава {i}. [Конкретный аспект темы]\n### {i}.1 [Теория]\n### {i}.2 [Практика/Современное состояние]"
+            for i in range(1, num_chapters + 1)
+        ])
+        words_per_ch = max(40, target_words // (num_chapters + 2))
         user_prompt = (
-            f"Напиши научный реферат на тему: «{topic}»\n\n"
-            f"🇷🇺 ОБЯЗАТЕЛЬНО: пиши ТОЛЬКО на русском языке!\n\n"
-            f"ПАРАМЕТРЫ:\n"
-            f"• ⚠️ Строгий объём: {target_words} слов ({pages} страниц A4) — не превышай!\n"
-            f"• Стандарт оформления: вузовский, ГОСТ\n\n"
-            f"СТРУКТУРА:\n"
-            f"## Введение\n"
-            f"Актуальность → степень изученности → объект → предмет → цель → задачи → методы → структура реферата\n\n"
-            f"## Глава 1. [Теоретические основы]\n"
-            f"### 1.1 [Понятийный аппарат]\n"
-            f"### 1.2 [Теоретические концепции]\n\n"
-            f"## Глава 2. [Основное содержание]\n"
-            f"### 2.1 [Анализ]\n"
-            f"### 2.2 [Практический аспект / современное состояние]\n\n"
-            f"{''.join([f'## Глава {i}. [Дополнительный аспект]\\n' for i in range(3, max(3, pages-2))])}"
-            f"## Заключение\n"
-            f"Выводы по каждой задаче → общее заключение → перспективы дальнейшего изучения\n\n"
-            f"## Список литературы\n"
-            f"Минимум 7 источников по ГОСТ\n\n"
-            f"{wishes_block}\n\n"
-            f"КРИТИЧНО: научный стиль, без воды, конкретные факты в каждом разделе."
+            f"Напиши научный реферат: «{topic}»\n\n"
+            f"🛑 ОБЪЁМ: РОВНО {target_words} СЛОВ ({pages} страниц). СТОП после {target_words} слов!\n\n"
+            f"СТРУКТУРА (ГОСТ):\n"
+            f"## Введение (~{words_per_ch} слов) — актуальность, объект, предмет, цель, задачи\n\n"
+            f"{chapters}\n\n"
+            f"## Заключение (~{words_per_ch} слов) — выводы по задачам + перспективы\n\n"
+            f"## Список литературы — минимум 5 источников по ГОСТ\n\n"
+            f"{wishes_block}\n"
+            f"❗ ИТОГО: {target_words} СЛОВ МАКСИМУМ!"
         )
 
     try:
@@ -5343,6 +5355,25 @@ async def _do_generate_report(msg_or_message, uid: int, state: dict, is_cb: bool
 
         # Убираем нумерованные сноски [1][2][3]
         ans = re.sub(r'\[\d+\]', '', ans).strip()
+
+        # ─── ЖЁСТКОЕ ОБРЕЗАНИЕ по словам ────────────────────────────────
+        # Если модель всё равно написала больше — обрезаем без пощады
+        _max_words = pages * 290  # 2 стр = 580 слов максимум
+        _words_all = ans.split()
+        if len(_words_all) > _max_words:
+            # Обрезаем по словам, потом добавляем последнюю законченную фразу
+            _cut = " ".join(_words_all[:_max_words])
+            # Ищем последнюю точку/! /? для красивого обрезания
+            _last_dot = max(
+                _cut.rfind(". "), _cut.rfind(".\n"), _cut.rfind("!\n"),
+                _cut.rfind("?\n"), _cut.rfind("! "), _cut.rfind("? ")
+            )
+            if _last_dot > len(_cut) // 2:
+                ans = _cut[:_last_dot + 1]
+            else:
+                ans = _cut
+            logging.info(f"[REPORT] Текст обрезан с {len(_words_all)} до {len(ans.split())} слов (лимит {_max_words})")
+        # ─────────────────────────────────────────────────────────────────
 
         # Списываем 3 продвинутых запроса
         for _ in range(3):
@@ -9063,6 +9094,14 @@ image_keyword — ПОИСКОВЫЙ ЗАПРОС для поиска фото. 
 ✅ "Napoleonic cavalry battle 1812 horses" | "Crimean War fortification soldiers"
 ✅ "Cold War nuclear bomb test explosion" | "space race rocket launch Sputnik"
 
+ОБЖ / БЕЗОПАСНОСТЬ (ГРАЖДАНСКАЯ — НЕ АМЕРИКАНСКИЕ ВОЕННЫЕ!):
+✅ "firefighters rescue building fire smoke" | "ambulance paramedics first aid emergency"
+✅ "evacuation crowd emergency exit building" | "earthquake rubble rescue workers"
+✅ "flood rescue boat helicopter disaster" | "police crowd security patrol"
+✅ "first aid cpr training mannequin" | "fire smoke alarm safety home"
+✅ "traffic accident car crash emergency" | "hazmat chemical suit workers"
+✅ "emergency shelter disaster relief people" | "school safety drill evacuation"
+
 БИЗНЕС / ФИНАНСЫ:
 ✅ "business meeting office professionals" | "stock market traders screens"
 ✅ "startup team whiteboard planning" | "handshake contract deal"
@@ -9124,6 +9163,86 @@ image_keyword — ПОИСКОВЫЙ ЗАПРОС для поиска фото. 
 
 
 
+def _sanitize_slide_keywords(pptx_data: dict, topic: str) -> dict:
+    """
+    Пост-обработка image_keyword для каждого слайда.
+    Заменяет нерелевантные/опасные keywords на тематически правильные.
+    """
+    topic_lower = topic.lower()
+    is_safety = any(w in topic_lower for w in [
+        'обж', 'безопасност', 'террор', 'скулшутинг', 'нападен', 'угроз',
+        'пожарн', 'эвакуац', 'чрезвычайн', 'первая помощь', 'ожог', 'отравлен',
+        'дтп', 'авари', 'спасател', 'выживан', 'наводнен', 'землетрясен', 'экстремальн',
+    ])
+
+    # Стоп-слова в keywords которые дают нерелевантные фото
+    BAD_KW_STARTS = [
+        'us army', 'us military', 'american military', 'american soldiers',
+        'american troops', 'us troops', 'pentagon', 'us navy', 'us air force',
+        'nato soldiers', 'nato troops', 'western military',
+    ]
+    BAD_WORDS_IN_KW = ['american', 'us army', 'pentagon', 'us military']
+
+    # Замены для ОБЖ тем по контексту заголовка слайда
+    SAFETY_KW_MAP = {
+        'fire': 'firefighters rescue emergency fire building',
+        'evacuat': 'evacuation crowd emergency exit building safety',
+        'terror': 'police security checkpoint crowd protection emergency',
+        'school': 'school safety security training evacuation drill students',
+        'bomb': 'police security evacuation emergency response team',
+        'attack': 'security police rescue emergency response protection',
+        'first aid': 'paramedics first aid medical emergency treatment bandage',
+        'flood': 'flood rescue boat emergency people water disaster',
+        'earthquake': 'earthquake rescue workers emergency destroyed building',
+        'accident': 'traffic accident road police rescue emergency',
+        'poison': 'medical emergency treatment hospital ambulance',
+        'burn': 'medical burn treatment hospital emergency',
+    }
+
+    slides = pptx_data.get('slides', [])
+    safety_kws = [
+        'firefighters rescue emergency scene',
+        'ambulance paramedics first aid emergency',
+        'evacuation crowd emergency exit building',
+        'police security patrol checkpoint crowd',
+        'first aid medical bandage treatment',
+        'emergency shelter people disaster relief',
+        'rescue team emergency responders uniform',
+        'school safety drill emergency students',
+    ]
+    safety_idx = 0
+
+    for i, slide in enumerate(slides):
+        kw = slide.get('image_keyword', '') or slide.get('image_query', '')
+        if not kw:
+            continue
+        kw_lower = kw.lower()
+
+        # Проверяем нет ли плохих слов
+        has_bad = any(bad in kw_lower for bad in BAD_WORDS_IN_KW)
+        has_bad_start = any(kw_lower.startswith(bad) for bad in BAD_KW_STARTS)
+
+        if is_safety and (has_bad or has_bad_start):
+            # Пробуем подобрать по заголовку
+            slide_title = (slide.get('title', '') + ' ' + str(slide.get('bullets', ''))).lower()
+            replacement = None
+            for key, replacement_kw in SAFETY_KW_MAP.items():
+                if key in slide_title or key in kw_lower:
+                    replacement = replacement_kw
+                    break
+            if not replacement:
+                replacement = safety_kws[safety_idx % len(safety_kws)]
+                safety_idx += 1
+            if 'image_keyword' in slide:
+                slide['image_keyword'] = replacement
+            if 'image_query' in slide:
+                slide['image_query'] = replacement
+            logging.info(f"[PPTX] Заменён keyword слайда {i}: '{kw}' → '{replacement}'")
+
+    pptx_data['slides'] = slides
+    return pptx_data
+
+
 async def generate_pptx_structure_ai(topic: str, slides_count: int,
                                      model_key: str, extra_wishes: str = "",
                                      title_info: dict | None = None) -> dict:
@@ -9152,8 +9271,32 @@ async def generate_pptx_structure_ai(topic: str, slides_count: int,
     is_military_topic = any(w in topic_lower for w in [
         "военн", "впк", "оборон", "армия", "нато", "войск", "ракет", "танк", "вооруж"
     ])
+    is_safety_topic = any(w in topic_lower for w in [
+        "обж", "безопасност", "террор", "скулшутинг", "нападен", "угроз",
+        "пожарн", "эвакуац", "чрезвычайн", "первая помощь", "ожог", "отравлен",
+        "дтп", "авари", "спасател", "экстремальн", "выживан", "наводнен", "землетрясен",
+    ])
 
-    if is_military_topic:
+    if is_safety_topic:
+        geo_rule = (
+            "⛔ ТЕМА ОБЖ/БЕЗОПАСНОСТЬ! image_keyword ОБЯЗАН быть из тематики безопасности. "
+            "ЗАПРЕЩЕНО: американские военные, US Army, NATO soldiers, Pentagon — это РОССИЙСКАЯ школьная тема!\n"
+            "ИСПОЛЬЗУЙ keywords: "
+            "'firefighters rescue emergency scene', "
+            "'ambulance paramedics first aid', "
+            "'evacuation crowd emergency exit building', "
+            "'police security patrol checkpoint crowd', "
+            "'earthquake destroyed building rescue workers', "
+            "'flood rescue boat emergency people', "
+            "'fire burning building emergency evacuation', "
+            "'first aid medical bandage treatment', "
+            "'traffic accident road police rescue', "
+            "'survival outdoor emergency wilderness nature', "
+            "'school safety security training drill', "
+            "'emergency shelter people disaster relief'. "
+            "Подбирай keyword под КОНКРЕТНОЕ СОДЕРЖАНИЕ каждого слайда!"
+        )
+    elif is_military_topic:
         geo_rule = (
             "⛔ ВОЕННАЯ ТЕМА! Первое слово image_keyword ОБЯЗАНО быть из этого списка: "
             "soldier, soldiers, military, army, tank, armored, weapon, weapons, missile, "
@@ -9305,8 +9448,28 @@ async def generate_html_structure_ai(
     is_military_topic = any(w in topic_lower for w in [
         "военн", "впк", "оборон", "армия", "нато", "войск", "ракет", "танк"
     ])
+    is_safety_topic = any(w in topic_lower for w in [
+        "обж", "безопасност", "чрезвычайн", "первая помощь", "пожарн", "эвакуац",
+        "землетрясен", "наводнен", "выживан", "гражданская оборона", "террор",
+        "скулшутинг", "нападен", "ожог", "отравлен", "дтп", "авари", "спасател",
+        "взрыв", "химическ", "радиац", "цунами", "урага", "лавин", "паводк",
+    ])
 
-    if is_military_topic:
+    if is_safety_topic:
+        geo_rule = (
+            "⛔ ТЕМА ПО ОБЖ/БЕЗОПАСНОСТИ — ГРАЖДАНСКАЯ ТЕМА! "
+            "АБСОЛЮТНО ЗАПРЕЩЕНО: американские военные, US Army, NATO soldiers, Pentagon, American police.\n"
+            "image_keyword ОБЯЗАН быть из тематики ГРАЖДАНСКОЙ БЕЗОПАСНОСТИ:\n"
+            "Примеры ПРАВИЛЬНЫХ keywords:\n"
+            "'firefighters rescue building fire smoke' | 'ambulance paramedics emergency street'\n"
+            "'evacuation crowd emergency exit' | 'earthquake rubble rescue workers survivors'\n"
+            "'flood rescue boat helicopter people' | 'police security patrol checkpoint'\n"
+            "'first aid cpr training mannequin' | 'fire alarm smoke safety home'\n"
+            "'traffic accident car crash police' | 'emergency shelter disaster relief'\n"
+            "'school safety drill evacuation students' | 'chemical hazmat suit workers'\n"
+            "Подбирай keyword к КОНКРЕТНОМУ содержанию каждого слайда!"
+        )
+    elif is_military_topic:
         geo_rule = (
             "⛔ ВОЕННАЯ ТЕМА! image_keyword ОБЯЗАН содержать военные объекты. "
             "Используй слова из этого списка как ПЕРВОЕ слово keyword: "
@@ -10022,20 +10185,50 @@ async def pptx_gen_plan_cb(callback: CallbackQuery):
     wait = await callback.message.answer("⏳ <i>Составляю план презентации...</i>", parse_mode="HTML")
     try:
         # Генерируем только структуру (названия слайдов) через быструю модель
-        volume_hint = {"brief": "кратко, 2-3 тезиса на слайд", "standard": "стандартно 4-5 тезисов", "detailed": "подробно 6-8 тезисов"}.get(volume, "стандартно")
+        volume_hint = {
+            "brief":    "кратко, 2-3 тезиса на слайд",
+            "standard": "стандартно 4-5 тезисов",
+            "detailed": "подробно 6-8 тезисов"
+        }.get(volume, "стандартно")
+
+        # Определяем тематику для умных названий слайдов
+        topic_lower_plan = topic.lower()
+        is_obzh_plan = any(w in topic_lower_plan for w in [
+            'обж', 'безопасност', 'чрезвычайн', 'первая помощь', 'пожарн',
+            'эвакуац', 'землетрясен', 'наводнен', 'выживан', 'террор',
+            'ожог', 'отравлен', 'дтп', 'авари', 'спасател',
+        ])
+
+        if is_obzh_plan:
+            plan_hint = (
+                "Это тема по ОБЖ/безопасности. Слайды должны включать:\n"
+                "- Что это за угроза/явление\n"
+                "- Статистика и реальные случаи\n"
+                "- Как распознать опасность\n"
+                "- Алгоритм действий\n"
+                "- Типичные ошибки\n"
+                "- Профилактика\n"
+                "- Выводы\n"
+            )
+        else:
+            plan_hint = f"Аудитория: {audience}. Объём: {volume_hint}.\n"
+
         plan_prompt = (
-            f"Составь план презентации на тему «{topic}».\n"
-            f"Аудитория: {audience}. Объём: {volume_hint}.\n"
+            f"Составь конкретный план презентации на тему «{topic}».\n"
+            f"{plan_hint}"
             f"Нужно ровно {slides_n} слайдов.\n"
-            "Первый слайд — всегда титульный (Заголовок).\n"
+            "Первый слайд — титульный (название темы).\n"
             "Последний — итоги/заключение.\n"
-            "Формат ответа — только пронумерованный список, например:\n"
-            "1. Название слайда\n"
-            "2. Название слайда\n"
-            "Без пояснений, только список."
+            "Каждое название слайда должно быть СОДЕРЖАТЕЛЬНЫМ и КОНКРЕТНЫМ — не 'Введение', а суть.\n"
+            "Примеры ХОРОШИХ названий: 'Статистика пожаров в России за 2023 год', 'Алгоритм действий при пожаре', 'Типичные ошибки и их последствия'.\n"
+            "Формат — ТОЛЬКО пронумерованный список:\n"
+            "1. Название\n"
+            "2. Название\n"
+            "Без пояснений и лишнего текста. Только список."
         )
         msgs = [{"role": "user", "content": plan_prompt}]
-        plan_text = (await call_chat(msgs, "claude_haiku", max_tokens=600)).strip()
+        plan_text = (await call_chat(msgs, "claude_haiku", max_tokens=800)).strip()
+
         # Парсим в список
         slides_list = []
         for line in plan_text.split("\n"):
@@ -10043,11 +10236,45 @@ async def pptx_gen_plan_cb(callback: CallbackQuery):
             if not line:
                 continue
             import re as _re
-            m = _re.match(r"^\d+\.\s*(.+)", line)
+            m = _re.match(r"^\d+[\.\)]\s*(.+)", line)
             if m:
-                slides_list.append(m.group(1).strip())
+                name = m.group(1).strip()
+                # Убираем звёздочки и лишние символы
+                name = _re.sub(r"\*+", "", name).strip()
+                if name:
+                    slides_list.append(name)
+
+        # Если по каким-то причинам имена всё равно плохие — перегенерируем через более сильную модель
+        generic_words = ["слайд", "slide", "глава", "раздел"]
+        has_generic = any(
+            any(g in s.lower() for g in generic_words) for s in slides_list
+        )
+        if len(slides_list) < 3 or has_generic:
+            # Пробуем claude_sonnet как запасной вариант
+            try:
+                plan_text2 = (await call_chat(msgs, "claude_sonnet", max_tokens=800)).strip()
+                slides_list2 = []
+                for line in plan_text2.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    m2 = _re.match(r"^\d+[\.\)]\s*(.+)", line)
+                    if m2:
+                        name2 = _re.sub(r"\*+", "", m2.group(1)).strip()
+                        if name2:
+                            slides_list2.append(name2)
+                if len(slides_list2) >= 3:
+                    slides_list = slides_list2
+            except Exception:
+                pass
+
+        # Финальный fallback с осмысленными именами
         if len(slides_list) < 3:
-            slides_list = [f"Слайд {i+1}" for i in range(slides_n)]
+            slides_list = (
+                [f"Введение в тему «{topic[:30]}»"] +
+                [f"Ключевой аспект {i}" for i in range(1, slides_n - 1)] +
+                ["Выводы и заключение"]
+            )[:slides_n]
 
         pptx_states[uid]["plan"] = slides_list
         await wait.delete()
