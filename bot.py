@@ -3672,19 +3672,10 @@ async def suno_get_result(task_id: str) -> dict:
 
 
 
-def main_reply_kb(uid: int) -> ReplyKeyboardMarkup:
-    rows = [
-        [KeyboardButton(
-            text="🤖 Открыть Хуза ИИ",
-            web_app=WebAppInfo(url=f"{MINI_APP_URL}?api={API_BASE_URL}&uid={uid}")
-        )],
-        [KeyboardButton(text="💬 Написать"), KeyboardButton(text="🎨 Создать")],
-        [KeyboardButton(text="👤 Профиль"),  KeyboardButton(text="💎 Подписка")],
-        [KeyboardButton(text="🏠 Главная")],
-    ]
-    if uid in ADMIN_IDS:
-        rows.append([KeyboardButton(text="🔥 Админ")])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+def main_reply_kb(uid: int) -> ReplyKeyboardRemove:
+    # Убираем все кнопки клавиатуры — кнопка "🤖 ХУЗА AI" находится слева
+    # в поле ввода через MenuButtonWebApp (set_chat_menu_button в main())
+    return ReplyKeyboardRemove()
 
 
 def home_kb(uid: int) -> InlineKeyboardMarkup:
@@ -17671,11 +17662,15 @@ async def main():
         BotCommand(command="about",   description="ℹ️ О боте"),
         BotCommand(command="info",    description="💡 Помощь и контакты"),
     ], scope=BotCommandScopeDefault())
-    # Устанавливаем стандартную кнопку меню (убираем "Открыть Хуза ИИ")
-    # WebApp кнопка остаётся слева в поле ввода через ReplyKeyboardMarkup
+    # Устанавливаем кнопку "🤖 ХУЗА AI" слева в поле ввода (MenuButtonWebApp)
     try:
-        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
-        logging.info("✅ Кнопка меню сброшена на стандартную (без 'Открыть Хуза ИИ')")
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="🤖 ХУЗА AI",
+                web_app=WebAppInfo(url=f"{MINI_APP_URL}?api={API_BASE_URL}")
+            )
+        )
+        logging.info(f"✅ WebApp кнопка слева установлена: {MINI_APP_URL}")
     except Exception as e:
         logging.warning(f"set_chat_menu_button: {e}")
     # Запускаем API сервер параллельно с ботом
