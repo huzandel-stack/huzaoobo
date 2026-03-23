@@ -369,7 +369,7 @@ async def generate_music_elevenlabs(prompt: str, lang: str = "en") -> bytes:
 
 # ─── Suno v5 через  ───────────────────────────────────────────────
 # URLs — переопределяй через переменные окружения
-MINI_APP_URL  = os.getenv("MINI_APP_URL",  "https://fe3od1337-eng.github.io/miniapp.html/")
+MINI_APP_URL  = os.getenv("MINI_APP_URL",  "https://fe3od1337-eng.github.io/index.html")
 VIEW_BASE_URL = os.getenv("VIEW_BASE_URL", "https://fe3od1337-eng.github.io/miniapp.html/View.html")
 API_BASE_URL  = os.getenv("API_BASE_URL",  "huzaoobo-production.up.railway.app")
 
@@ -17470,7 +17470,7 @@ async def main():
     ], scope=BotCommandScopeDefault())
     # Устанавливаем WebApp кнопку слева в поле ввода
     try:
-        MINI_APP_URL = os.getenv("MINI_APP_URL", f"https://huzaoobo-production.up.railway.app/view")
+        MINI_APP_URL = os.getenv("MINI_APP_URL", f"https://fe3od1337-eng.github.io/index.html)
         await bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
                 text="🤖 ХУЗА AI",
