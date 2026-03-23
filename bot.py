@@ -17470,7 +17470,7 @@ async def main():
     ], scope=BotCommandScopeDefault())
     # Устанавливаем WebApp кнопку слева в поле ввода
     try:
-        MINI_APP_URL = os.getenv("MINI_APP_URL", f"https://fe3od1337-eng.github.io/index.html)
+        MINI_APP_URL = os.getenv("MINI_APP_URL","https://fe3od1337-eng.github.io/index.html)
         await bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
                 text="🤖 ХУЗА AI",
