@@ -3924,9 +3924,16 @@ async def cmd_start(message: Message):
     # Сохраняем в БД
     asyncio.create_task(db_save_user(uid, name, message.from_user.username or ""))
 
-    # Клавиатура — всегда
+    # Клавиатура — убираем принудительно (ReplyKeyboardRemove)
     try:
-        await message.answer("👋", reply_markup=main_reply_kb(uid))
+        await message.answer(".", reply_markup=ReplyKeyboardRemove())
+        # Удаляем служебное сообщение
+        from aiogram.exceptions import TelegramBadRequest
+        try:
+            last = await message.answer("‌", reply_markup=ReplyKeyboardRemove())
+            await last.delete()
+        except Exception:
+            pass
     except Exception as e:
         logging.error(f"start kb error: {e}")
 
@@ -17675,6 +17682,25 @@ async def main():
         logging.warning(f"set_chat_menu_button: {e}")
     # Запускаем API сервер параллельно с ботом
     await start_api_server()
+    # ── Убираем старую Reply-клавиатуру у всех пользователей при старте ──
+    async def _clear_keyboards_on_start():
+        await asyncio.sleep(3)  # Ждём пока бот поднимется
+        cleared = 0
+        for uid in list(user_profiles.keys()):
+            try:
+                msg = await bot.send_message(
+                    uid,
+                    "‌",  # невидимый символ
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                await msg.delete()
+                cleared += 1
+                await asyncio.sleep(0.05)  # не флудим
+            except Exception:
+                pass
+        logging.info(f"[STARTUP] Клавиатура убрана у {cleared} пользователей")
+    asyncio.create_task(_clear_keyboards_on_start())
+    # ──────────────────────────────────────────────────────────────────
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
