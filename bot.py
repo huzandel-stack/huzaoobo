@@ -16625,7 +16625,11 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
     action  = data.get("action", "chat")
     uid     = int(data.get("uid", 0) or 0)
     text    = data.get("text", "").strip()
+    # Фронт шлёт либо "image" (строка base64) либо "images" (массив) — принимаем оба формата
+    _img_single = data.get("image")
     images  = data.get("images", [])
+    if _img_single and not images:
+        images = [_img_single]
     model   = data.get("model", "")
     # Frontend sends "messages", backend historically used "history" — support both
     history = data.get("history") or data.get("messages", [])
@@ -16876,22 +16880,42 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
     li   = get_limits_info(uid)
     prof = user_profiles.get(uid, {})
     sub_active = has_active_sub(uid)
+    _sub_expires = sub_expires_str(uid) if sub_active else ""
+    _sub_plan    = sub_plan_label(uid)
     return aiohttp_web.Response(
         text=_j.dumps({
-            "ok":           True,
-            "fast_left":    0,
-            "pro_left":     li["pro_max"]  - li["pro_used"],
-            "img_left":     li["img_max"]  - li["img_used"],
-            "fast_max":     0,
-            "pro_max":      li["pro_max"],
-            "img_max":      li["img_max"],
-            "img_used":     li["img_used"],
-            "requests":     prof.get("requests", 0),
-            "joined":       prof.get("joined", ""),
+            "ok":             True,
+            # ── лимиты (используются фронтом) ──────────────────────
+            "pro_used":       li["pro_used"],
+            "pro_max":        li["pro_max"],
+            "fast_left":      0,
+            "pro_left":       li["pro_max"] - li["pro_used"],
+            "img_used":       li["img_used"],
+            "img_max":        li["img_max"],
+            "img_left":       li["img_max"] - li["img_used"],
+            "music_used":     li.get("music_used", 0),
+            "music_max":      li.get("music_max", 0),
+            "video_used":     li.get("video_used", 0),
+            "video_max":      li.get("video_max", 0),
+            # ── подписка (has_sub — именно то поле что читает фронт) ─
+            "has_sub":        sub_active,
+            "sub_active":     sub_active,
+            "sub_expires":    _sub_expires,
+            "sub_plan":       _sub_plan,
+            "plan":           _sub_plan,
+            "expires":        _sub_expires,
+            # ── профиль ────────────────────────────────────────────
+            "total_requests": prof.get("requests", 0),
+            "requests":       prof.get("requests", 0),
+            "total_gens":     prof.get("generations", 0),
+            "join_date":      prof.get("joined", ""),
             "terms_accepted": await _has_accepted(uid),
-            "sub_active":   sub_active,
-            "sub_expires":  sub_expires_str(uid) if sub_active else None,
-            "sub_plan":     sub_plan_label(uid),
+            "referrals":      prof.get("referrals", 0),
+            "level":          prof.get("level", 0),
+            "level_max":      50,
+            "reset_in":       li.get("reset_in", ""),
+            "model":          MODELS.get(user_models.get(uid, DEFAULT_MODEL), {}).get("label", ""),
+            "mode":           user_features.get(uid, {}).get("answer_mode", "fast"),
         }, ensure_ascii=False),
         headers=headers
     )
@@ -17434,6 +17458,159 @@ async def platega_callback_handler(request: aiohttp_web.Request) -> aiohttp_web.
     return aiohttp_web.Response(text="ok")
 
 
+async def api_report_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    """POST /api/report — генерация реферата/доклада из мини-аппа."""
+    import json as _j, base64 as _b64
+    headers = {
+        "Access-Control-Allow-Origin":  "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Content-Type": "application/json",
+    }
+    if request.method == "OPTIONS":
+        return aiohttp_web.Response(status=200, headers=headers)
+    try:
+        raw = await request.read()
+        data = _j.loads(raw.decode("utf-8"))
+    except Exception:
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": "Invalid JSON"}),
+            status=400, headers=headers)
+
+    uid    = int(data.get("uid", 0) or 0)
+    topic  = data.get("topic", "").strip()
+    pages  = int(data.get("pages", 5))
+    model  = data.get("model", "claude_opus")
+    extra  = data.get("extra", "")
+    rtype  = data.get("type", "report")  # "report" | "referat"
+
+    if not uid:
+        # Попробуем извлечь uid из init_data
+        try:
+            import urllib.parse as _up
+            _idata = data.get("init_data", "")
+            if _idata:
+                _params = dict(_up.parse_qsl(_idata))
+                _uobj = _j.loads(_params.get("user", "{}"))
+                uid = int(_uobj.get("id", 0))
+        except Exception:
+            pass
+
+    if not uid or not topic:
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": "uid and topic required"}),
+            status=400, headers=headers)
+
+    ok_sub, _ = await check_subscription(uid)
+    if not ok_sub:
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": "subscription_required"}), headers=headers)
+
+    _init_limits(uid)
+    _refresh_limits(uid)
+    li = get_limits_info(uid)
+    if li["pro_max"] - li["pro_used"] < 3:
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": "limit_exceeded",
+                           "pro_left": li["pro_max"] - li["pro_used"]}), headers=headers)
+
+    if model not in MODELS:
+        model = "claude_opus"
+
+    # Определяем тип документа
+    is_referat = rtype == "referat"
+    rtype_label = "Реферат" if is_referat else "Доклад"
+    target_words = pages * 250
+
+    wishes_block = f"Дополнительно: {extra}\n" if extra else ""
+
+    if is_referat:
+        num_chapters = max(2, pages - 2)
+        chapters = "\n".join([
+            f"## Глава {i}. [Конкретный аспект темы]"
+            for i in range(1, num_chapters + 1)
+        ])
+        system_prompt = (
+            "Ты — автор научного реферата. Пишешь академично.\n"
+            "🇷🇺 ТОЛЬКО РУССКИЙ ЯЗЫК.\n"
+            "Пишешь ТОЛЬКО реферат, без предисловий и комментариев."
+        )
+        user_prompt = (
+            f"Напиши научный реферат: «{topic}»\n\n"
+            f"🛑 ОБЪЁМ: примерно {target_words} слов ({pages} страниц).\n\n"
+            f"СТРУКТУРА:\n## Введение\n{chapters}\n## Заключение\n## Список литературы\n\n"
+            f"{wishes_block}"
+        )
+    else:
+        num_sections = max(1, pages - 1)
+        sections = "\n".join([f"## Раздел {i}" for i in range(1, num_sections + 1)])
+        system_prompt = (
+            "Ты — профессиональный автор школьных и студенческих докладов.\n"
+            "🇷🇺 ОБЯЗАТЕЛЬНО: Весь доклад пиши ТОЛЬКО на русском языке.\n"
+            "Пишешь ТОЛЬКО сам текст доклада, без вступлений и комментариев."
+        )
+        user_prompt = (
+            f"Напиши доклад на тему: «{topic}»\n\n"
+            f"ОБЪЁМ: примерно {target_words} слов ({pages} страниц).\n\n"
+            f"СТРУКТУРА:\n## Введение\n{sections}\n## Заключение\n\n"
+            f"{wishes_block}"
+        )
+
+    try:
+        msgs = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ]
+        _fallbacks = ["claude_opus", "claude_sonnet", "deepseek_v3_sq", "qwen3_max"]
+        ans = ""
+        for _dm in _fallbacks:
+            if _dm not in MODELS:
+                continue
+            try:
+                _ans = await call_chat(msgs, _dm, max_tokens=4096)
+                if _ans and len(_ans.strip()) > 200:
+                    ans = _ans
+                    break
+            except Exception as _e:
+                logging.warning(f"[API_REPORT] {_dm} ошибка: {_e}")
+                continue
+
+        if not ans or len(ans.strip()) < 100:
+            raise RuntimeError("Не удалось сгенерировать документ. Попробуй ещё раз.")
+
+        # Списываем 3 запроса
+        for _ in range(3):
+            user_limits[uid]["pro_used"] = user_limits[uid].get("pro_used", 0) + 1
+
+        # Создаём docx
+        path = await _create_report_docx(
+            topic=topic, rtype_label=rtype_label, pages=pages,
+            model_label=MODELS.get(model, {}).get("label", model),
+            content=ans, uid=uid, author="", with_title=True
+        )
+
+        async with aiofiles.open(path, "rb") as f:
+            docx_bytes = await f.read()
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+
+        fname = f"{rtype_label}_{topic[:25].replace(' ', '_')}.docx"
+        return aiohttp_web.Response(
+            text=_j.dumps({
+                "ok":       True,
+                "docx_b64": _b64.b64encode(docx_bytes).decode(),
+                "filename": fname,
+            }, ensure_ascii=False),
+            headers=headers)
+    except Exception as e:
+        logging.error(f"api_report_handler: {e}")
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": str(e)[:300]}),
+            status=500, headers=headers)
+
+
 async def start_api_server():
     app = aiohttp_web.Application(client_max_size=20 * 1024 * 1024)  # 20MB для base64 фото
     app.router.add_post("/suno_callback", suno_callback_handler)
@@ -17451,6 +17628,8 @@ async def start_api_server():
     app.router.add_options("/api/pptx", api_pptx_handler)
     app.router.add_post("/api/webpptx", api_webpptx_handler)
     app.router.add_options("/api/webpptx", api_webpptx_handler)
+    app.router.add_post("/api/report", api_report_handler)
+    app.router.add_options("/api/report", api_report_handler)
     app.router.add_get("/api/answer/{ans_id}", api_answer_handler)
     app.router.add_options("/api/answer/{ans_id}", api_answer_handler)
     # ✅ View.html раздаётся с Railway — GitHub Pages не нужен!
@@ -17492,16 +17671,11 @@ async def main():
         BotCommand(command="about",   description="ℹ️ О боте"),
         BotCommand(command="info",    description="💡 Помощь и контакты"),
     ], scope=BotCommandScopeDefault())
-    # Устанавливаем WebApp кнопку слева в поле ввода
+    # Устанавливаем стандартную кнопку меню (убираем "Открыть Хуза ИИ")
+    # WebApp кнопка остаётся слева в поле ввода через ReplyKeyboardMarkup
     try:
-        MINI_APP_URL = os.getenv("MINI_APP_URL", "https://fe3od1337-eng.github.io/index.html")
-        await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="🤖 ХУЗА AI",
-                web_app=WebAppInfo(url=MINI_APP_URL)
-            )
-        )
-        logging.info(f"✅ WebApp кнопка установлена: {MINI_APP_URL}")
+        await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+        logging.info("✅ Кнопка меню сброшена на стандартную (без 'Открыть Хуза ИИ')")
     except Exception as e:
         logging.warning(f"set_chat_menu_button: {e}")
     # Запускаем API сервер параллельно с ботом
