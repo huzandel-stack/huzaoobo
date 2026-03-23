@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager as fm
 from matplotlib.font_manager import FontProperties
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
-from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonDefault
+from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonDefault, MenuButtonWebApp
 from aiogram.filters import Command
 from typing import Callable, Dict, Any, Awaitable
 from aiogram.types import (
@@ -17468,9 +17468,16 @@ async def main():
         BotCommand(command="about",   description="ℹ️ О боте"),
         BotCommand(command="info",    description="💡 Помощь и контакты"),
     ], scope=BotCommandScopeDefault())
-    # Убираем кнопку "Меню" слева в поле ввода
+    # Устанавливаем WebApp кнопку слева в поле ввода
     try:
-        await bot.set_chat_menu_button()  # сбрасывает на default (без кнопки Меню)
+        MINI_APP_URL = os.getenv("MINI_APP_URL", f"https://huzaoobo-production.up.railway.app/view")
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="🤖 ХУЗА AI",
+                web_app=WebAppInfo(url=MINI_APP_URL)
+            )
+        )
+        logging.info(f"✅ WebApp кнопка установлена: {MINI_APP_URL}")
     except Exception as e:
         logging.warning(f"set_chat_menu_button: {e}")
     # Запускаем API сервер параллельно с ботом
