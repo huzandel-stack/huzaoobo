@@ -16623,7 +16623,7 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
         )
 
     action  = data.get("action", "chat")
-    uid     = int(data.get("uid", 0))
+    uid     = int(data.get("uid", 0) or 0)
     text    = data.get("text", "").strip()
     images  = data.get("images", [])
     model   = data.get("model", "")
@@ -16637,6 +16637,21 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
                 if isinstance(content, str):
                     text = content
                 break
+
+    # If uid not sent, try to extract from Telegram init_data
+    if not uid:
+        try:
+            import urllib.parse as _up
+            _idata = data.get("init_data", "")
+            if _idata:
+                _params = dict(_up.parse_qsl(_idata))
+                _user_json = _params.get("user", "")
+                if _user_json:
+                    import json as _jj
+                    _uobj = _jj.loads(_user_json)
+                    uid = int(_uobj.get("id", 0))
+        except Exception:
+            pass
 
     if not uid:
         return aiohttp_web.Response(
