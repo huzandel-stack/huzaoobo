@@ -11767,7 +11767,7 @@ async def cb_pay_platega(callback: CallbackQuery):
     logging.info(f"[PLATEGA] Создаю платёж uid={uid} plan={plan_key} order={order_id} "
                  f"amount={plan['price']} url={PLATEGA_API_URL}")
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as sess:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12, connect=6)) as sess:
             async with sess.post(PLATEGA_API_URL, json=payload, headers=headers) as resp:
                 status_code = resp.status
                 raw = await resp.text()
@@ -11803,10 +11803,17 @@ async def cb_pay_platega(callback: CallbackQuery):
         )
     except Exception as e:
         logging.error(f"[PLATEGA] Ошибка создания платежа uid={uid} plan={plan_key}: {e}")
+        # Определяем тип ошибки для понятного сообщения
+        _err_str = str(e).lower()
+        if "name or service not known" in _err_str or "cannot connect" in _err_str or "connection" in _err_str:
+            _err_msg = "Платёжный сервис временно недоступен."
+        elif "timeout" in _err_str:
+            _err_msg = "Сервис не ответил вовремя. Попробуй ещё раз."
+        else:
+            _err_msg = "Не удалось создать платёж."
         await callback.message.edit_text(
-            f"❌ <b>Не удалось создать платёж через Platega.</b>\n\n"
-            f"Причина: <code>{str(e)[:150]}</code>\n\n"
-            f"Попробуй оплатить через ЮKassa или напиши в поддержку: @helphuza",
+            f"❌ <b>{_err_msg}</b>\n\n"
+            f"Оплати через ЮKassa или обратись в поддержку: @helphuza",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🏧 ЮKassa — оплатить", callback_data=f"pay_yukassa_{plan_key}")],
@@ -16890,8 +16897,8 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
 
 
 async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
-    """GET /api/limits?uid=123 — возвращает текущие лимиты пользователя."""
-    import json as _j
+    """GET /api/limits?uid=123&init_data=... — возвращает текущие лимиты пользователя."""
+    import json as _j, urllib.parse as _up
     headers = {
         "Access-Control-Allow-Origin": "*",
         "Content-Type": "application/json",
@@ -16900,7 +16907,27 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
     try:
         uid = int(uid_str)
     except Exception:
-        return aiohttp_web.Response(text=_j.dumps({"ok": False}), headers=headers)
+        uid = 0
+
+    # Если uid не передан или равен 0 — пробуем извлечь из Telegram init_data
+    if not uid:
+        try:
+            _idata = request.rel_url.query.get("init_data", "")
+            if _idata:
+                _params = dict(_up.parse_qsl(_idata))
+                _user_json = _params.get("user", "")
+                if _user_json:
+                    _uobj = _j.loads(_user_json)
+                    uid = int(_uobj.get("id", 0))
+        except Exception:
+            pass
+
+    if not uid:
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": "No uid"}, ensure_ascii=False),
+            headers=headers
+        )
+
     _init_limits(uid)
     li   = get_limits_info(uid)
     prof = user_profiles.get(uid, {})
@@ -17712,4 +17739,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())  
+    asyncio.run(main())
