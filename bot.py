@@ -97,7 +97,7 @@ YOOKASSA_TOKEN = os.getenv("YOOKASSA_TOKEN", "390540012:LIVE:91556")  # пуст
 # ── Platega (прямые платежи) ──────────────────────────────────────
 PLATEGA_MERCHANT_ID = os.getenv("PLATEGA_MERCHANT_ID", "1db27759-f7bd-4067-a43d-95bc2ecf2d8a")  # Merchant ID из ЛК Platega
 PLATEGA_SECRET      = os.getenv("PLATEGA_SECRET", "zeSCSorfEl8qtEUjtuEHzjG6xsIOt9e8KzB4wDcuZcqmw4vr9CfaP0lktpSyP60ze2N4FD8QhB8zBaCzfmL4AhUC11lXd5hc6vSE")       # X-Secret из ЛК Platega
-PLATEGA_API_URL     = "https://app.platega.io/transaction/process"
+PLATEGA_API_URL     = "https://api.platega.io/v1/payment"
 
 IO_CHAT      = "https://api.intelligence.io.solutions/api/v1/chat/completions"
 IO_AUDIO     = "https://api.intelligence.io.solutions/api/v1/audio/transcriptions"
@@ -1852,10 +1852,12 @@ def get_limits_info(uid: int) -> dict:
     _refresh_limits(uid)
     lim = user_limits[uid]
     L   = _get_lims(uid)
+    _rst = _reset_str(uid, "pro")
     return {
-        "fast_used":   0,   "fast_max":   0,   "fast_reset": "",  # убраны
+        "fast_used":   0,   "fast_max":   0,   "fast_reset": "",
         "pro_used":    lim["pro_used"],  "pro_max":  L["pro_day"],
-        "pro_reset":   _reset_str(uid, "pro"),
+        "pro_reset":   _rst,
+        "reset_in":    _rst,
         "img_used":    lim["img_used"],  "img_max":  L["img_month"],
         "music_used":  lim.get("music_used", 0), "music_max": L["music_month"],
         "video_used":  lim.get("video_used", 0), "video_max": L["video_month"],
@@ -11733,41 +11735,64 @@ async def cb_pay_platega(callback: CallbackQuery):
     plan = SUB_PLANS[plan_key]
 
     if not (PLATEGA_MERCHANT_ID and PLATEGA_SECRET):
-        await callback.answer("❌ Platega не настроена", show_alert=True)
+        await callback.answer("❌ Platega не настроена — обратитесь к администратору", show_alert=True)
         return
 
     await callback.answer()
-    await callback.message.edit_text("⏳ Создаю платёж...", parse_mode="HTML")
+    await callback.message.edit_text("⏳ Создаю платёж через Platega...")
 
+    import time as _time
+    order_id = f"huza_{plan_key}_{uid}_{int(_time.time())}"
+    bot_info  = await bot.get_me()
+    return_url = f"https://t.me/{bot_info.username}?start=sub_check"
+
+    # Актуальный payload Platega v1
     payload = {
-        "paymentMethod": 2,          # СБП QR (самый универсальный)
-        "paymentDetails": {
-            "amount":   float(plan["price"]),
-            "currency": "RUB",
-        },
-        "description": f"Подписка «{plan['name']}» — {plan['days']} дней",
-        "payload":      f"sub_{plan_key}_{uid}",
-        "return":       f"https://t.me/{(await bot.get_me()).username}",
+        "amount":      int(plan["price"]),          # целое, в рублях
+        "currency":    "RUB",
+        "order_id":    order_id,
+        "description": f"ХУЗА AI — {plan['name']} ({plan['days']} дней)",
+        "customer":    {"uid": str(uid)},
+        "meta":        {"plan": plan_key, "uid": uid},
+        "success_url": return_url,
+        "fail_url":    return_url,
+        "webhook_url": f"https://huzaoobo-production.up.railway.app/platega_webhook",
     }
     headers = {
         "Content-Type":  "application/json",
-        "X-MerchantId":  PLATEGA_MERCHANT_ID,
-        "X-Secret":      PLATEGA_SECRET,
+        "Authorization": f"Bearer {PLATEGA_SECRET}",
+        "X-Merchant-Id": PLATEGA_MERCHANT_ID,
     }
+
+    logging.info(f"[PLATEGA] Создаю платёж uid={uid} plan={plan_key} order={order_id} "
+                 f"amount={plan['price']} url={PLATEGA_API_URL}")
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as sess:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as sess:
             async with sess.post(PLATEGA_API_URL, json=payload, headers=headers) as resp:
-                data = await resp.json()
-        logging.info(f"[PLATEGA] uid={uid} plan={plan_key} resp={data}")
+                status_code = resp.status
+                raw = await resp.text()
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:
+                    data = {}
+        logging.info(f"[PLATEGA] uid={uid} status={status_code} resp={raw[:500]}")
 
-        redirect = data.get("redirect") or data.get("url") or data.get("paymentUrl")
+        # Ищем ссылку в разных полях ответа
+        redirect = (data.get("payment_url") or data.get("redirect") or
+                    data.get("url") or data.get("paymentUrl") or
+                    data.get("link") or data.get("checkout_url"))
+
         if not redirect:
-            raise ValueError(f"Нет ссылки в ответе: {data}")
+            err_detail = data.get("message") or data.get("error") or raw[:200]
+            logging.error(f"[PLATEGA] Нет ссылки в ответе uid={uid}: {err_detail}")
+            raise ValueError(f"HTTP {status_code}: {err_detail}")
 
+        logging.info(f"[PLATEGA] Платёж создан uid={uid} order={order_id} link={redirect}")
         await callback.message.edit_text(
             f"✅ <b>Платёж создан!</b>\n\n"
             f"◆ Тариф — <b>{plan['name']}</b>\n"
-            f"◆ Цена — <b>{plan['price']} ₽</b>\n\n"
+            f"◆ Цена — <b>{plan['price']} ₽</b>\n"
+            f"◆ Заказ — <code>{order_id}</code>\n\n"
             f"👇 Нажми кнопку ниже для оплаты.\n"
             f"После оплаты подписка активируется автоматически.",
             parse_mode="HTML",
@@ -11777,13 +11802,15 @@ async def cb_pay_platega(callback: CallbackQuery):
             ]),
         )
     except Exception as e:
-        logging.error(f"[PLATEGA] create payment error uid={uid}: {e}")
+        logging.error(f"[PLATEGA] Ошибка создания платежа uid={uid} plan={plan_key}: {e}")
         await callback.message.edit_text(
-            f"❌ Ошибка при создании платежа Platega.\n\n"
-            f"Попробуй оплатить через ЮKassa или напиши в поддержку:\n@helphuza",
+            f"❌ <b>Не удалось создать платёж через Platega.</b>\n\n"
+            f"Причина: <code>{str(e)[:150]}</code>\n\n"
+            f"Попробуй оплатить через ЮKassa или напиши в поддержку: @helphuza",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🏧 ЮKassa — оплатить", callback_data=f"pay_yukassa_{plan_key}")],
+                [InlineKeyboardButton(text="🔄 Повторить попытку", callback_data=f"pay_platega_{plan_key}")],
                 [InlineKeyboardButton(text="◀️ Назад", callback_data=f"sub_buy_{plan_key}")],
             ]),
         )
@@ -17685,4 +17712,4 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())  
