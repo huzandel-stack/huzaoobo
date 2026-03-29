@@ -952,7 +952,7 @@ ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "5613085898").split(",") if 
 TOKENS_START = 0  # Legacy токены (не используются, лимиты через user_limits)
 
 LIMITS = {
-    "pro_day":      25,   # запросы / reset_h ч (бесплатно)
+    "pro_day":      30,   # запросы / reset_h ч (бесплатно)
     "img_month":    5,    # генерация фото / месяц (бесплатно)
     "music_month":  0,    # генерация музыки / месяц (бесплатно = 0)
     "video_month":  0,    # генерация видео / месяц (бесплатно = 0)
@@ -966,7 +966,7 @@ SUB_PLANS = {
         "days":          7,
         "label":         "⚡ 7 дней — 60 ₽",
         "description":   "7 дней полного доступа",
-        "pro_day":       30,
+        "pro_day":       75,
         "img_month":     50,
         "music_month":   3,
         "video_month":   3,
@@ -978,7 +978,7 @@ SUB_PLANS = {
         "days":          30,
         "label":         "💎 30 дней — 100 ₽",
         "description":   "30 дней полного доступа",
-        "pro_day":       30,
+        "pro_day":       75,
         "img_month":     100,
         "music_month":   3,
         "video_month":   3,
@@ -16877,6 +16877,10 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
         last_responses[uid] = {"q": text or "[Фото]", "a": ans, "model_label": used_model_label, "model_key": mk}
         if uid in user_profiles:
             user_profiles[uid]["requests"] = user_profiles[uid].get("requests", 0) + 1
+            # Пересчитываем уровень
+            _total_req = user_profiles[uid]["requests"]
+            _level_thresholds = [0, 50, 100, 200, 500, 1000, 2000, 5000]
+            user_profiles[uid]["level"] = sum(1 for t in _level_thresholds if _total_req >= t)
 
         li = get_limits_info(uid)
         return aiohttp_web.Response(
@@ -16966,7 +16970,7 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             "terms_accepted": await _has_accepted(uid),
             "referrals":      len(user_referrals.get(uid, {}).get("refs", [])),
             "level":          prof.get("level", 0),
-            "level_max":      50,
+            "level_max":      next((t for t in [50, 100, 200, 500, 1000, 2000, 5000] if t > prof.get("requests", 0)), 5000),
             "reset_in":       li.get("reset_in", ""),
             "model":          MODELS.get(user_models.get(uid, DEFAULT_MODEL), {}).get("label", ""),
             "mode":           user_features.get(uid, {}).get("answer_mode", "fast"),
