@@ -17764,7 +17764,7 @@ async def main():
         await bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
                 text="🤖 ХУЗА AI",
-                web_app=WebAppInfo(url=f"{MINI_APP_URL}?api={API_BASE_URL}")
+                web_app=WebAppInfo(url=f"{MINI_APP_URL}?v=5&api={API_BASE_URL}")
             )
         )
         logging.info(f"✅ WebApp кнопка слева установлена: {MINI_APP_URL}")
