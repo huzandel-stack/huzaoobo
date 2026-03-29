@@ -16981,9 +16981,10 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             "plan":           _sub_plan,
             "expires":        _sub_expires,
             # ── профиль ────────────────────────────────────────────
-            "total_requests": prof.get("requests", 0),
-            "requests":       prof.get("requests", 0),
-            "total_gens":     user_images_count.get(uid, 0),
+            "total_requests":    prof.get("requests", 0),
+            "requests":          prof.get("requests", 0),
+            "total_gens":        user_images_count.get(uid, 0),
+            "total_generations": user_images_count.get(uid, 0),
             "join_date":      prof.get("joined", ""),
             "terms_accepted": await _has_accepted(uid),
             "referrals":      len(user_referrals.get(uid, {}).get("refs", [])),
@@ -17471,10 +17472,14 @@ async def platega_callback_handler(request: aiohttp_web.Request) -> aiohttp_web.
     Body JSON: { "status": "CONFIRMED", "payload": "sub_week_123456", "transactionId": "...", ... }
     """
     try:
-        # Проверяем секрет
-        secret = request.headers.get("X-Secret", "")
+        # Проверяем секрет и merchant ID
+        secret   = request.headers.get("X-Secret", "")
+        merchant = request.headers.get("X-Merchant-Id", "")
         if PLATEGA_SECRET and secret != PLATEGA_SECRET:
             logging.warning(f"[PLATEGA CB] неверный X-Secret: {secret!r}")
+            return aiohttp_web.Response(status=403, text="Forbidden")
+        if PLATEGA_MERCHANT_ID and merchant and merchant != PLATEGA_MERCHANT_ID:
+            logging.warning(f"[PLATEGA CB] неверный X-Merchant-Id: {merchant!r}")
             return aiohttp_web.Response(status=403, text="Forbidden")
 
         body = await request.json()
