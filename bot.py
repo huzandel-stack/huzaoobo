@@ -974,6 +974,8 @@ PE = {
     "tag": "5886285355279193209",
     "refresh": "5345906554510012647",
     "back": "5893057118545646106",
+    "write": "5870753782874246579",   # ✍ Писать
+    "brush": "6050679691004612757",   # 🖌 Кисточка / создать
 }
 
 
@@ -983,6 +985,11 @@ def tg_emoji(icon_id: str, fallback: str) -> str:
 
 def ixb(text: str, *, callback_data: str | None = None, url: str | None = None, icon_id: str | None = None) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=callback_data, url=url, icon_custom_emoji_id=icon_id)
+
+
+def rkb(text: str, icon_id: str) -> KeyboardButton:
+    """ReplyKeyboard: только премиум-иконка + текст без Unicode-эмодзи."""
+    return KeyboardButton(text=text, icon_custom_emoji_id=icon_id)
 
 # ── Лимиты запросов ─────────────────────────────────────────────
 # Быстрые запросы убраны — все модели используют единый счётчик pro_used
@@ -3712,14 +3719,14 @@ async def suno_get_result(task_id: str) -> dict:
 
 def main_reply_kb(uid: int) -> ReplyKeyboardMarkup:
     # Кнопка "Открыть Хуза ИИ" УБРАНА — она теперь слева в поле ввода (MenuButtonWebApp)
-    # Остальные кнопки навигации оставлены
+    # Иконки — только custom_emoji_id (в text не кладём обычные эмодзи)
     rows = [
-        [KeyboardButton(text="💬 Написать"), KeyboardButton(text="🎨 Создать")],
-        [KeyboardButton(text="👤 Профиль"),  KeyboardButton(text="💎 Подписка")],
-        [KeyboardButton(text="🏠 Главная")],
+        [rkb("Написать", PE["write"]), rkb("Создать", PE["brush"])],
+        [rkb("Профиль", PE["profile"]), rkb("Подписка", PE["wallet"])],
+        [rkb("Главная", PE["home"])],
     ]
     if uid in ADMIN_IDS:
-        rows.append([KeyboardButton(text="🔥 Админ")])
+        rows.append([rkb("Админ", PE["settings"])])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
@@ -3923,11 +3930,11 @@ def imggen_prompt_kb() -> InlineKeyboardMarkup:
 # ==================================================================
 
 def _welcome_text(name: str, tok: int = 0, is_admin: bool = False, ref_bonus_msg: str = "") -> str:
-    admin_badge = "  ▣ <b>ADMIN</b>" if is_admin else ""
+    admin_badge = f"  {tg_emoji(PE['settings'], '⚙')} <b>ADMIN</b>" if is_admin else ""
     ref_line = f"\n{ref_bonus_msg}" if ref_bonus_msg else ""
     return (
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ <b>ХУЗА</b> — нейросеть{admin_badge}\n"
+        f"{tg_emoji(PE['send_up'], '⚡')} <b>ХУЗА</b> — нейросеть{admin_badge}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"<b>{name}</b>{ref_line}\n\n"
         "◈ 28 нейросетей — Claude · GPT · Gemini\n"
@@ -10832,7 +10839,7 @@ async def _do_generate_pptx(msg, uid: int, state: dict):
 # ==================================================================
 
 
-@dp.message(F.text == "👤 Профиль")
+@dp.message(F.text == "Профиль")
 async def rb_profile(message: Message):
     uid  = message.from_user.id
     # Профиль доступен всем без проверки подписки
@@ -11046,7 +11053,7 @@ async def rb_clear(message: Message):
     )
 
 
-@dp.message(F.text == "🔥 Админ")
+@dp.message(F.text == "Админ")
 async def rb_admin(message: Message):
     uid = message.from_user.id
     if uid not in ADMIN_IDS:
@@ -11054,7 +11061,7 @@ async def rb_admin(message: Message):
     await show_admin_panel(message)
 
 
-@dp.message(F.text == "💬 Написать")
+@dp.message(F.text == "Написать")
 async def rb_napisat(message: Message):
     uid = message.from_user.id
     # Если активна модель генерации картинок — сбрасываем на текстовую
@@ -11092,7 +11099,7 @@ async def rb_napisat(message: Message):
     )
 
 
-@dp.message(F.text == "🎨 Создать")
+@dp.message(F.text == "Создать")
 async def rb_sozdat(message: Message):
     if not await require_subscription(message):
         return
@@ -11108,7 +11115,7 @@ async def rb_sozdat(message: Message):
                          parse_mode="HTML", reply_markup=kb)
 
 
-@dp.message(F.text == "🏠 Главная")
+@dp.message(F.text == "Главная")
 async def rb_glavnaya(message: Message):
     uid  = message.from_user.id
     name = message.from_user.first_name or "Пользователь"
@@ -11701,7 +11708,7 @@ def _sub_menu_kb(uid: int) -> InlineKeyboardMarkup:
     ])
 
 
-@dp.message(F.text == "💎 Подписка")
+@dp.message(F.text == "Подписка")
 async def rb_sub_menu(message: Message):
     uid = message.from_user.id
     await message.answer(
