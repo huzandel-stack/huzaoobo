@@ -1100,9 +1100,9 @@ async def db_load_subscriptions():
 def sub_buy_kb() -> InlineKeyboardMarkup:
     """Клавиатура выбора тарифа при покупке."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="7 дней — 60 ₽",  callback_data="sub_buy_week",  icon_custom_emoji_id="5983150113483134607")],
-        [InlineKeyboardButton(text="30 дней — 100 ₽", callback_data="sub_buy_month", icon_custom_emoji_id="5904462880941545555")],
-        [InlineKeyboardButton(text="Назад",            callback_data="back_home",     icon_custom_emoji_id="5893057118545646106")],
+        [InlineKeyboardButton(text="⚡ 7 дней — 60 ₽",  callback_data="sub_buy_week")],
+        [InlineKeyboardButton(text="💎 30 дней — 100 ₽", callback_data="sub_buy_month")],
+        [InlineKeyboardButton(text="🏠 Назад",           callback_data="back_home")],
     ])
 
 
@@ -1658,7 +1658,7 @@ async def _accept_terms_cb(callback: CallbackQuery):
     is_admin = uid in ADMIN_IDS
     await callback.message.answer("👋", reply_markup=main_reply_kb(uid))
     await callback.message.answer(
-        _welcome_text(name, tok, is_admin, uid=uid),
+        _welcome_text(name, tok, is_admin),
         parse_mode="HTML",
         reply_markup=home_kb(uid),
     )
@@ -1962,7 +1962,7 @@ async def check_sub_callback(callback: CallbackQuery):
         name = callback.from_user.first_name or "Пользователь"
         tok = get_tokens(uid)
         await callback.message.edit_text(
-            _welcome_text(name, tok, uid=uid),
+            _welcome_text(name, tok),
             parse_mode="HTML",
             reply_markup=home_kb(uid)
         )
@@ -3688,26 +3688,25 @@ def main_reply_kb(uid: int) -> ReplyKeyboardMarkup:
 
 
 def home_kb(uid: int) -> InlineKeyboardMarkup:
-    sub_text = "Подписка ✅" if has_active_sub(uid) else "Купить подписку"
-    sub_emoji = "5870633910337015697" if has_active_sub(uid) else "5904462880941545555"
+    sub_text = "💎 Подписка ✅" if has_active_sub(uid) else "💎 Купить подписку"
     built = [
         [
-            InlineKeyboardButton(text="Написать",          callback_data="menu_ask",      icon_custom_emoji_id="5870753782874246579"),
-            InlineKeyboardButton(text="Профиль",           callback_data="menu_profile",  icon_custom_emoji_id="5870994129244131212"),
+            InlineKeyboardButton(text="💬 Написать",          callback_data="menu_ask"),
+            InlineKeyboardButton(text="👤 Профиль",           callback_data="menu_profile"),
         ],
         [
-            InlineKeyboardButton(text="Картинки · Видео",  callback_data="menu_extra",    icon_custom_emoji_id="6035128606563241721"),
+            InlineKeyboardButton(text="🎨 Картинки · Видео",  callback_data="menu_extra"),
         ],
         [
-            InlineKeyboardButton(text="Очистить память",   callback_data="clear_memory",  icon_custom_emoji_id="5870875489362513438"),
+            InlineKeyboardButton(text="🧹 Очистить память",   callback_data="clear_memory"),
         ],
         [
-            InlineKeyboardButton(text="Поддержка",         callback_data="menu_support",  icon_custom_emoji_id="6039422865189638057"),
-            InlineKeyboardButton(text=sub_text,            callback_data="sub_menu",      icon_custom_emoji_id=sub_emoji),
+            InlineKeyboardButton(text="💬 Поддержка",         callback_data="menu_support"),
+            InlineKeyboardButton(text=sub_text,               callback_data="sub_menu"),
         ],
     ]
     if uid in ADMIN_IDS:
-        built.append([InlineKeyboardButton(text="Админ", callback_data="menu_admin", icon_custom_emoji_id="5870982283724328568")])
+        built.append([InlineKeyboardButton(text="⚙️ Админ", callback_data="menu_admin")])
     return InlineKeyboardMarkup(inline_keyboard=built)
 
 
@@ -3887,22 +3886,14 @@ def imggen_prompt_kb() -> InlineKeyboardMarkup:
 # 💬 ТЕКСТЫ — ПРЕМИУМ СТИЛЬ
 # ==================================================================
 
-def _welcome_text(name: str, tok: int = 0, is_admin: bool = False, ref_bonus_msg: str = "", uid: int = 0) -> str:
+def _welcome_text(name: str, tok: int = 0, is_admin: bool = False, ref_bonus_msg: str = "") -> str:
     admin_badge = "  ▣ <b>ADMIN</b>" if is_admin else ""
     ref_line = f"\n{ref_bonus_msg}" if ref_bonus_msg else ""
-    # Показываем остаток запросов
-    if uid:
-        _init_limits(uid)
-        li = get_limits_info(uid)
-        pro_left = max(0, li["pro_max"] - li["pro_used"])
-        req_line = f'\n<tg-emoji emoji-id="5870633910337015697">✅</tg-emoji> Запросов сегодня: <b>{pro_left}</b> / {li["pro_max"]}\n'
-    else:
-        req_line = ""
     return (
         "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f'<tg-emoji emoji-id="5870930636742595124">📊</tg-emoji> <b>ХУЗА</b> — нейросеть{admin_badge}\n'
+        f"⚡ <b>ХУЗА</b> — нейросеть{admin_badge}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"<b>{name}</b>{ref_line}{req_line}\n"
+        f"<b>{name}</b>{ref_line}\n\n"
         "◈ 28 нейросетей — Claude · GPT · Gemini\n"
         "◈ Генерация картинок, видео, музыки\n"
         "◈ Vision — анализ фото и документов\n"
@@ -3959,7 +3950,7 @@ async def cmd_start(message: Message):
     try:
         tok = get_tokens(uid)
         is_admin = uid in ADMIN_IDS
-        text = _welcome_text(name, tok, is_admin, uid=uid)
+        text = _welcome_text(name, tok, is_admin)
         # Trial disabled
         await message.answer(text, parse_mode="HTML", reply_markup=home_kb(uid))
     except Exception as e:
@@ -11085,7 +11076,7 @@ async def rb_sozdat(message: Message):
 async def rb_glavnaya(message: Message):
     uid  = message.from_user.id
     name = message.from_user.first_name or "Пользователь"
-    await message.answer(_welcome_text(name, 0, uid in ADMIN_IDS, uid=uid),
+    await message.answer(_welcome_text(name, 0, uid in ADMIN_IDS),
                          parse_mode="HTML", reply_markup=home_kb(uid))
 
 
@@ -11119,11 +11110,11 @@ async def menu_home_cb(callback: CallbackQuery):
     tok  = get_tokens(uid)
     try:
         await callback.message.edit_text(
-            _welcome_text(name, tok, uid in ADMIN_IDS, uid=uid),
+            _welcome_text(name, tok, uid in ADMIN_IDS),
             parse_mode="HTML", reply_markup=home_kb(uid)
         )
     except Exception:
-        await callback.message.answer(_welcome_text(name, tok, uid in ADMIN_IDS, uid=uid), parse_mode="HTML", reply_markup=home_kb(uid))
+        await callback.message.answer(_welcome_text(name, tok, uid in ADMIN_IDS), parse_mode="HTML", reply_markup=home_kb(uid))
     await callback.answer()
 
 
@@ -11663,14 +11654,14 @@ def _sub_menu_kb(uid: int) -> InlineKeyboardMarkup:
     active = has_active_sub(uid)
     if active:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Продлить 7 дней — 60 ₽",  callback_data="sub_buy_week",  icon_custom_emoji_id="5983150113483134607")],
-            [InlineKeyboardButton(text="Продлить 30 дней — 100 ₽", callback_data="sub_buy_month", icon_custom_emoji_id="5904462880941545555")],
-            [InlineKeyboardButton(text="Главная", callback_data="back_home", icon_custom_emoji_id="5873147866364514353")],
+            [InlineKeyboardButton(text="⚡ Продлить 7 дней — 60 ₽",  callback_data="sub_buy_week")],
+            [InlineKeyboardButton(text="💎 Продлить 30 дней — 100 ₽", callback_data="sub_buy_month")],
+            [InlineKeyboardButton(text="🏠 Главная", callback_data="back_home")],
         ])
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="7 дней — 60 ₽",  callback_data="sub_buy_week",  icon_custom_emoji_id="5983150113483134607")],
-        [InlineKeyboardButton(text="30 дней — 100 ₽", callback_data="sub_buy_month", icon_custom_emoji_id="5904462880941545555")],
-        [InlineKeyboardButton(text="Главная", callback_data="back_home", icon_custom_emoji_id="5873147866364514353")],
+        [InlineKeyboardButton(text="⚡ 7 дней — 60 ₽",  callback_data="sub_buy_week")],
+        [InlineKeyboardButton(text="💎 30 дней — 100 ₽", callback_data="sub_buy_month")],
+        [InlineKeyboardButton(text="🏠 Главная", callback_data="back_home")],
     ])
 
 
@@ -13017,7 +13008,7 @@ async def back_home(callback: CallbackQuery):
     uid  = callback.from_user.id
     name = callback.from_user.first_name or "Пользователь"
     tok  = get_tokens(uid)
-    home_text = _welcome_text(name, tok, uid in ADMIN_IDS, uid=uid)
+    home_text = _welcome_text(name, tok, uid in ADMIN_IDS)
     try:
         await callback.message.edit_text(home_text, parse_mode="HTML", reply_markup=home_kb(uid))
     except Exception:
