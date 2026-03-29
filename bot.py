@@ -11823,9 +11823,7 @@ async def cb_pay_platega(callback: CallbackQuery):
         else:
             _err_msg = "Не удалось создать платёж."
         await callback.message.edit_text(
-            f'<tg-emoji emoji-id="5870657884844462243">❌</tg-emoji> <b>{_err_msg}</b>
-
-'
+            f'<tg-emoji emoji-id="5870657884844462243">❌</tg-emoji> <b>{_err_msg}</b>\n\n'
             f'Оплати через ЮKassa или обратись в поддержку: @helphuza',
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
