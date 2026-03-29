@@ -369,7 +369,7 @@ async def generate_music_elevenlabs(prompt: str, lang: str = "en") -> bytes:
 
 # ─── Suno v5 через  ───────────────────────────────────────────────
 # URLs — переопределяй через переменные окружения
-MINI_APP_URL  = os.getenv("MINI_APP_URL",  "https://fe3od1337-eng.github.io/index.html")
+MINI_APP_URL  = os.getenv("MINI_APP_URL",  "https://fe3od1337-eng.github.io/index.html?v=5&api=https://huzaoobo-production.up.railway.app")
 VIEW_BASE_URL = os.getenv("VIEW_BASE_URL", "https://fe3od1337-eng.github.io/miniapp.html/View.html")
 API_BASE_URL  = os.getenv("API_BASE_URL",  "https://huzaoobo-production.up.railway.app")
 
@@ -16917,13 +16917,13 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
 
 
 async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
-    """GET /api/limits?uid=123&init_data=... — возвращает текущие лимиты пользователя."""
+    """GET /api/limits?user_id=123 — возвращает текущие лимиты пользователя."""
     import json as _j, urllib.parse as _up
     headers = {
         "Access-Control-Allow-Origin": "*",
         "Content-Type": "application/json",
     }
-    uid_str = request.rel_url.query.get("uid", "0")
+    uid_str = request.rel_url.query.get("user_id") or request.rel_url.query.get("uid", "0")
     try:
         uid = int(uid_str)
     except Exception:
@@ -16944,7 +16944,8 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
 
     if not uid:
         return aiohttp_web.Response(
-            text=_j.dumps({"ok": False, "error": "No uid"}, ensure_ascii=False),
+            text=_j.dumps({"error": "No user_id"}, ensure_ascii=False),
+            status=400,
             headers=headers
         )
 
@@ -16956,11 +16957,10 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
     _sub_plan    = sub_plan_label(uid)
     return aiohttp_web.Response(
         text=_j.dumps({
-            "ok":             True,
             # ── профиль пользователя ────────────────────────────────
             "user_id":        uid,
-            "name":           prof.get("name", ""),
-            "username":       prof.get("username", ""),
+            "name":           prof.get("name", "") or f"user_{uid}",
+            "username":       prof.get("username", "") or f"user_{uid}",
             # ── лимиты (используются фронтом) ──────────────────────
             "pro_used":       li["pro_used"],
             "pro_max":        li["pro_max"],
@@ -17764,7 +17764,7 @@ async def main():
         await bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
                 text="🤖 ХУЗА AI",
-                web_app=WebAppInfo(url=f"{MINI_APP_URL}?v=5&api={API_BASE_URL}")
+                web_app=WebAppInfo(url=MINI_APP_URL)
             )
         )
         logging.info(f"✅ WebApp кнопка слева установлена: {MINI_APP_URL}")
