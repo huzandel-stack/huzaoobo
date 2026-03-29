@@ -11763,7 +11763,7 @@ async def cb_pay_platega(callback: CallbackQuery):
         "meta":        {"plan": plan_key, "uid": uid},
         "success_url": return_url,
         "fail_url":    return_url,
-        "webhook_url": f"https://huzaoobo-production.up.railway.app/platega_callback",
+        "webhook_url": f"{API_BASE_URL}/platega_callback",
     }
     headers = {
         "Content-Type":  "application/json",
