@@ -1100,9 +1100,15 @@ async def db_load_subscriptions():
 def sub_buy_kb() -> InlineKeyboardMarkup:
     """Клавиатура выбора тарифа при покупке."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡ 7 дней — 60 ₽",  callback_data="sub_buy_week")],
-        [InlineKeyboardButton(text="💎 30 дней — 100 ₽", callback_data="sub_buy_month")],
-        [InlineKeyboardButton(text="🏠 Назад",           callback_data="back_home")],
+        [InlineKeyboardButton(text="7 дней — 60 ₽",
+                              callback_data="sub_buy_week",
+                              icon_custom_emoji_id="5983150113483134607")],
+        [InlineKeyboardButton(text="30 дней — 100 ₽",
+                              callback_data="sub_buy_month",
+                              icon_custom_emoji_id="5769126056262898415")],
+        [InlineKeyboardButton(text="Назад",
+                              callback_data="back_home",
+                              icon_custom_emoji_id="5893057118545646106")],
     ])
 
 
@@ -3691,25 +3697,39 @@ def main_reply_kb(uid: int) -> ReplyKeyboardMarkup:
 
 
 def home_kb(uid: int) -> InlineKeyboardMarkup:
-    sub_text = "💎 Подписка ✅" if has_active_sub(uid) else "💎 Купить подписку"
+    sub_text = "Подписка ✅" if has_active_sub(uid) else "Купить подписку"
     built = [
         [
-            InlineKeyboardButton(text="💬 Написать",          callback_data="menu_ask"),
-            InlineKeyboardButton(text="👤 Профиль",           callback_data="menu_profile"),
+            InlineKeyboardButton(text="Написать",
+                                 callback_data="menu_ask",
+                                 icon_custom_emoji_id="5870657884844462243"),
+            InlineKeyboardButton(text="Профиль",
+                                 callback_data="menu_profile",
+                                 icon_custom_emoji_id="5870994129244131212"),
         ],
         [
-            InlineKeyboardButton(text="🎨 Картинки · Видео",  callback_data="menu_extra"),
+            InlineKeyboardButton(text="Картинки · Видео",
+                                 callback_data="menu_extra",
+                                 icon_custom_emoji_id="6035128606563241721"),
         ],
         [
-            InlineKeyboardButton(text="🧹 Очистить память",   callback_data="clear_memory"),
+            InlineKeyboardButton(text="Очистить память",
+                                 callback_data="clear_memory",
+                                 icon_custom_emoji_id="5870875489362513438"),
         ],
         [
-            InlineKeyboardButton(text="💬 Поддержка",         callback_data="menu_support"),
-            InlineKeyboardButton(text=sub_text,               callback_data="sub_menu"),
+            InlineKeyboardButton(text="Поддержка",
+                                 callback_data="menu_support",
+                                 icon_custom_emoji_id="5870657884844462243"),
+            InlineKeyboardButton(text=sub_text,
+                                 callback_data="sub_menu",
+                                 icon_custom_emoji_id="5769126056262898415"),
         ],
     ]
     if uid in ADMIN_IDS:
-        built.append([InlineKeyboardButton(text="⚙️ Админ", callback_data="menu_admin")])
+        built.append([InlineKeyboardButton(text="Админ",
+                                           callback_data="menu_admin",
+                                           icon_custom_emoji_id="5870982283724328568")])
     return InlineKeyboardMarkup(inline_keyboard=built)
 
 
@@ -10892,36 +10912,37 @@ async def _show_profile(msg_or_cb, uid: int):
         prog = "👑 максимум"
 
     sub_active = has_active_sub(uid)
-    sub_line   = f"💎 <b>Подписка</b> — {'✅ активна до ' + sub_expires_str(uid) if sub_active else '❌ нет'}"
+    sub_icon   = '<tg-emoji emoji-id="5870633910337015697">✅</tg-emoji>' if sub_active else '<tg-emoji emoji-id="5870657884844462243">❌</tg-emoji>'
+    sub_line   = f'<tg-emoji emoji-id="5769126056262898415">💎</tg-emoji> <b>Подписка</b> — {sub_icon} {"активна до " + sub_expires_str(uid) if sub_active else "нет"}'
 
     trial_line = ""  # Trial disabled
 
     text = (
         "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-        f"👤 <b>ПРОФИЛЬ</b>  ·  {level_name}\n"
+        f'<tg-emoji emoji-id="5870994129244131212">👤</tg-emoji> <b>ПРОФИЛЬ</b>  ·  {level_name}\n'
         "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
         f"◈ Имя — <b>{name}</b>\n"
         f"◈ ID — <code>{uid}</code>\n"
         f"◈ Дата входа — <code>{joined}</code>\n"
         f"◈ {sub_line}\n"
-        "━━ 📊 Статистика ━━━━━━━━━━\n\n"
+        f'━━ <tg-emoji emoji-id="5870921681735781843">📊</tg-emoji> Статистика ━━━━━━━━━\n\n'
         f"◈ Запросов — <b>{requests}</b>\n"
         f"◈ Генераций — <b>{imgs}</b>\n"
         f"◈ Рефералов — <b>{len(refs)}</b>\n"
         f"◈ Уровень — {prog}\n\n"
-        "━━ ⚙️ Настройки ━━━━━━━━━━\n\n"
+        f'━━ <tg-emoji emoji-id="5870982283724328568">⚙️</tg-emoji> Настройки ━━━━━━━━━\n\n'
         f"◈ Модель — <code>{cur_label}</code>\n"
         f"◈ Режим — {mode_label}\n"
         f"◈ Авто-модель — {'✅ вкл' if auto_model else '❌ выкл'}\n\n"
-        "━━ 💎 Лимиты ━━━━━━━━━━━━\n\n"
+        f'━━ <tg-emoji emoji-id="5870930636742595124">📊</tg-emoji> Лимиты ━━━━━━━━━━━\n\n'
         f"◈ Запросы — <b>{pro_left}</b> / {li['pro_max']}  ↺ {li['pro_reset']}\n"
         f"◈ 🎨 Картинки — <b>{img_left}</b> / {li['img_max']}  в месяц\n"
         + (f"◈ 🎵 Музыка — <b>{max(0, li['music_max'] - li['music_used'])}</b> / {li['music_max']}  в месяц\n"
            if sub_active else
-           "◈ 🎵 Музыка — 🔒 только с подпиской (3 трека/мес)\n")
+           f'◈ 🎵 Музыка — <tg-emoji emoji-id="6037249452824072506">🔒</tg-emoji> только с подпиской (3 трека/мес)\n')
         + (f"◈ 🎬 Видео — <b>{max(0, li['video_max'] - li['video_used'])}</b> / {li['video_max']}  в месяц\n"
            if sub_active else
-           "◈ 🎬 Видео — 🔒 только с подпиской\n")
+           f'◈ 🎬 Видео — <tg-emoji emoji-id="6037249452824072506">🔒</tg-emoji> только с подпиской\n')
         + "\n▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
     )
     # Кнопки режимов (2+2)
@@ -10932,18 +10953,28 @@ async def _show_profile(msg_or_cb, uid: int):
     mode_row2 = [InlineKeyboardButton(
         text=ANSWER_MODES[m][0] + (" ✓" if m == answer_mode else ""),
         callback_data=f"set_mode_{m}") for m in mode_keys[2:]]
-    doc_btn = "📄 Документы ✅" if feats.get("doc_analysis") else "📄 Документы ❌"
+    doc_btn  = "📄 Документы ✅" if feats.get("doc_analysis") else "📄 Документы ❌"
     auto_btn = f"🤖 Авто {'✅' if auto_model else '❌'}"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         mode_row1,
         mode_row2,
         [InlineKeyboardButton(text=auto_btn,  callback_data="toggle_auto_model"),
          InlineKeyboardButton(text=doc_btn,   callback_data="toggle_doc_analysis")],
-        [InlineKeyboardButton(text="📋 История",         callback_data="show_history"),
-         InlineKeyboardButton(text="🎟 Промокод",        callback_data="profile_promo")],
-        [InlineKeyboardButton(text="🔗 Реф. ссылка",    callback_data="profile_reflink"),
-         InlineKeyboardButton(text="💬 Поддержка",       callback_data="menu_support")],
-        [InlineKeyboardButton(text="🏠 Главная",         callback_data="back_home")],
+        [InlineKeyboardButton(text="📋 История",
+                              callback_data="show_history",
+                              icon_custom_emoji_id="5890937706803894250"),
+         InlineKeyboardButton(text="🎟 Промокод",
+                              callback_data="profile_promo",
+                              icon_custom_emoji_id="6032644646587338669")],
+        [InlineKeyboardButton(text="🔗 Реф. ссылка",
+                              callback_data="profile_reflink",
+                              icon_custom_emoji_id="5769289093221454192"),
+         InlineKeyboardButton(text="💬 Поддержка",
+                              callback_data="menu_support",
+                              icon_custom_emoji_id="5870657884844462243")],
+        [InlineKeyboardButton(text="🏠 Главная",
+                              callback_data="back_home",
+                              icon_custom_emoji_id="5873147866364514353")],
     ])
     if is_cb:
         try:
@@ -17676,6 +17707,109 @@ async def api_report_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             status=500, headers=headers)
 
 
+async def api_user_profile_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    """GET /user/profile?uid=...&init_data=... — полный профиль пользователя для мини-аппа."""
+    import json as _j, urllib.parse as _up
+    headers = {
+        "Access-Control-Allow-Origin":  "*",
+        "Access-Control-Allow-Headers": "*",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+    if request.method == "OPTIONS":
+        return aiohttp_web.Response(status=200, headers=headers)
+
+    uid_str = request.rel_url.query.get("uid", "0")
+    try:
+        uid = int(uid_str)
+    except Exception:
+        uid = 0
+
+    # Пробуем извлечь uid из Telegram init_data если не передан напрямую
+    if not uid:
+        try:
+            _idata = request.rel_url.query.get("init_data", "")
+            if _idata:
+                _params = dict(_up.parse_qsl(_idata))
+                _user_json = _params.get("user", "")
+                if _user_json:
+                    _uobj = _j.loads(_user_json)
+                    uid = int(_uobj.get("id", 0))
+        except Exception:
+            pass
+
+    if not uid:
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": "No uid"}, ensure_ascii=False),
+            status=400, headers=headers,
+        )
+
+    _init_limits(uid)
+    _refresh_limits(uid)
+    li   = get_limits_info(uid)
+    prof = user_profiles.get(uid, {})
+    sub_active    = has_active_sub(uid)
+    _sub_expires  = sub_expires_str(uid) if sub_active else ""
+    _sub_plan_key = user_subscriptions.get(uid, {}).get("plan", "") if uid in user_subscriptions else ""
+    _sub_plan_lbl = sub_plan_label(uid)
+
+    total_req = prof.get("requests", 0)
+    lv_name, lv_next = get_user_level(total_req)
+    lv_idx = 0
+    for i, (req, _) in enumerate(LEVELS):
+        if total_req >= req:
+            lv_idx = i
+    lv_next_req = LEVELS[lv_idx + 1][0] if lv_idx + 1 < len(LEVELS) else None
+
+    return aiohttp_web.Response(
+        text=_j.dumps({
+            "ok":   True,
+            # ── Идентификация ──────────────────────────────────
+            "id":           uid,
+            "name":         prof.get("name", ""),
+            "username":     prof.get("username", ""),
+            "join_date":    prof.get("joined", ""),
+            # ── Статистика ────────────────────────────────────
+            "requests":     total_req,
+            "total_requests": total_req,
+            "generations":  user_images_count.get(uid, 0),
+            "total_gens":   user_images_count.get(uid, 0),
+            "referrals":    len(user_referrals.get(uid, {}).get("refs", [])),
+            # ── Уровень ───────────────────────────────────────
+            "level_name":   lv_name,
+            "level":        lv_idx,
+            "level_max":    lv_next_req or total_req,
+            "level_next":   lv_next_req,
+            # ── Подписка ──────────────────────────────────────
+            "plan":         "premium" if sub_active else "free",
+            "plan_key":     _sub_plan_key,
+            "plan_label":   _sub_plan_lbl,
+            "has_sub":      sub_active,
+            "sub_active":   sub_active,
+            "sub_expires":  _sub_expires,
+            # ── Лимиты ────────────────────────────────────────
+            "limits": {
+                "requests_day":   li["pro_max"],
+                "requests_used":  li["pro_used"],
+                "requests_left":  max(0, li["pro_max"] - li["pro_used"]),
+                "images":         li["img_max"],
+                "images_used":    li["img_used"],
+                "images_left":    max(0, li["img_max"] - li["img_used"]),
+                "music":          li.get("music_max", 0),
+                "music_used":     li.get("music_used", 0),
+                "video":          li.get("video_max", 0),
+                "video_used":     li.get("video_used", 0),
+                "reset_in":       li.get("reset_in", ""),
+            },
+            # ── Настройки ─────────────────────────────────────
+            "model":        MODELS.get(user_settings.get(uid, DEFAULT_MODEL), {}).get("label", ""),
+            "model_key":    user_settings.get(uid, DEFAULT_MODEL),
+            "mode":         user_features.get(uid, {}).get("answer_mode", "fast"),
+            "terms_accepted": uid in _terms_accepted,
+        }, ensure_ascii=False),
+        headers=headers,
+    )
+
+
 async def start_api_server():
     app = aiohttp_web.Application(client_max_size=20 * 1024 * 1024)  # 20MB для base64 фото
     app.router.add_post("/suno_callback", suno_callback_handler)
@@ -17687,6 +17821,8 @@ async def start_api_server():
     app.router.add_post("/api/imggen", api_imggen_handler)
     app.router.add_options("/api/imggen", api_imggen_handler)
     app.router.add_get("/api/limits", api_limits_handler)
+    app.router.add_get("/user/profile", api_user_profile_handler)
+    app.router.add_options("/user/profile", api_user_profile_handler)
     app.router.add_post("/api/transcribe", api_transcribe_handler)
     app.router.add_options("/api/transcribe", api_transcribe_handler)
     app.router.add_post("/api/pptx", api_pptx_handler)
