@@ -242,6 +242,7 @@ BUTTON_ICON_HINTS: dict[str, str | None] = {
 
 _PREMIUM_TEXT_TOKENS = tuple(sorted(PREMIUM_TEXT_HINTS, key=len, reverse=True))
 _BUTTON_TOKENS = tuple(sorted(BUTTON_ICON_HINTS, key=len, reverse=True))
+PREMIUM_BUTTON_ICON_ONLY = os.getenv("PREMIUM_BUTTON_ICON_ONLY", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def premium_emoji(name: str, fallback: str = "•") -> str:
@@ -271,6 +272,8 @@ def _sanitize_button_text(text: str) -> str:
 
 def _normalize_button(text: str) -> tuple[str, str | None]:
     raw = (text or "").strip()
+    if not PREMIUM_BUTTON_ICON_ONLY:
+        return raw or text, None
     icon_custom_emoji_id = None
     for token in _BUTTON_TOKENS:
         if raw.startswith(token):
