@@ -1755,6 +1755,9 @@ def _get_lims(uid: int) -> dict:
     if has_active_sub(uid):
         sub  = user_subscriptions.get(uid, {})
         plan = SUB_PLANS.get(sub.get("plan", ""), {})
+        if not plan:
+            # Подписка есть, но план не найден — берём максимальный (month)
+            plan = SUB_PLANS.get("month", {})
         if plan:
             return {
                 "pro_day":     plan["pro_day"],
@@ -11769,7 +11772,7 @@ async def cb_pay_platega(callback: CallbackQuery):
     logging.info(f"[PLATEGA] Создаю платёж uid={uid} plan={plan_key} order={order_id} "
                  f"amount={plan['price']} url={PLATEGA_API_URL}")
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12, connect=6)) as sess:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20, connect=8)) as sess:
             async with sess.post(PLATEGA_API_URL, json=payload, headers=headers) as resp:
                 status_code = resp.status
                 raw = await resp.text()
@@ -11815,12 +11818,13 @@ async def cb_pay_platega(callback: CallbackQuery):
             _err_msg = "Не удалось создать платёж."
         await callback.message.edit_text(
             f'<tg-emoji emoji-id="5870657884844462243">❌</tg-emoji> <b>{_err_msg}</b>\n\n'
-            f'Оплати через ЮKassa или обратись в поддержку: @helphuza',
+            f'Оплати через ЮKassa (кнопка ниже) или напиши в поддержку: @helphuza',
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="ЮKassa — оплатить", callback_data=f"pay_yukassa_{plan_key}", icon_custom_emoji_id="5879814368572478751")],
-                [InlineKeyboardButton(text="Повторить попытку", callback_data=f"pay_platega_{plan_key}", icon_custom_emoji_id="5345906554510012647")],
-                [InlineKeyboardButton(text="Назад", callback_data=f"sub_buy_{plan_key}", icon_custom_emoji_id="5893057118545646106")],
+                [InlineKeyboardButton(text="💳 ЮKassa — оплатить", callback_data=f"pay_yukassa_{plan_key}", icon_custom_emoji_id="5879814368572478751")],
+                [InlineKeyboardButton(text="🔄 Повторить попытку", callback_data=f"pay_platega_{plan_key}", icon_custom_emoji_id="5345906554510012647")],
+                [InlineKeyboardButton(text="📞 Поддержка", url="https://t.me/helphuza", icon_custom_emoji_id="6028435952299413210")],
+                [InlineKeyboardButton(text="◁ Назад", callback_data=f"sub_buy_{plan_key}", icon_custom_emoji_id="5893057118545646106")],
             ]),
         )
 
@@ -16875,12 +16879,15 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
             used_model_label = MODELS[mk]["label"]
 
         last_responses[uid] = {"q": text or "[Фото]", "a": ans, "model_label": used_model_label, "model_key": mk}
-        if uid in user_profiles:
-            user_profiles[uid]["requests"] = user_profiles[uid].get("requests", 0) + 1
-            # Пересчитываем уровень
-            _total_req = user_profiles[uid]["requests"]
-            _level_thresholds = [0, 50, 100, 200, 500, 1000, 2000, 5000]
-            user_profiles[uid]["level"] = sum(1 for t in _level_thresholds if _total_req >= t)
+        if uid not in user_profiles:
+            user_profiles[uid] = {"name": "", "username": "", "joined": msk_now().strftime("%d.%m.%Y %H:%M"), "requests": 0, "last_bonus": None}
+        user_profiles[uid]["requests"] = user_profiles[uid].get("requests", 0) + 1
+        # Пересчитываем уровень
+        _total_req = user_profiles[uid]["requests"]
+        _level_thresholds = [0, 50, 100, 200, 500, 1000, 2000, 5000]
+        user_profiles[uid]["level"] = sum(1 for t in _level_thresholds if _total_req >= t)
+        # Сохраняем requests в БД асинхронно
+        asyncio.create_task(db_save_user(uid))
 
         li = get_limits_info(uid)
         return aiohttp_web.Response(
@@ -16972,7 +16979,7 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             "level":          prof.get("level", 0),
             "level_max":      next((t for t in [50, 100, 200, 500, 1000, 2000, 5000] if t > prof.get("requests", 0)), 5000),
             "reset_in":       li.get("reset_in", ""),
-            "model":          MODELS.get(user_models.get(uid, DEFAULT_MODEL), {}).get("label", ""),
+            "model":          MODELS.get(user_settings.get(uid, DEFAULT_MODEL), {}).get("label", ""),
             "mode":           user_features.get(uid, {}).get("answer_mode", "fast"),
         }, ensure_ascii=False),
         headers=headers
