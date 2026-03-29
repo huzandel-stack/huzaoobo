@@ -946,6 +946,44 @@ pptx_states: dict  = {}  # uid -> dict с настройками презент�
 
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "5613085898").split(",") if x.strip().isdigit()}
 
+# Premium emoji IDs (Telegram custom emoji)
+PE = {
+    "settings": "5870982283724328568",
+    "profile": "5870994129244131212",
+    "users": "5870772616305839506",
+    "file": "5870528606328852614",
+    "chart": "5870930636742595124",
+    "home": "5873147866364514353",
+    "lock": "6037249452824072506",
+    "unlock": "6037496202990194718",
+    "megaphone": "6039422865189638057",
+    "ok": "5870633910337015697",
+    "cross": "5870657884844462243",
+    "link": "5769289093221454192",
+    "info": "6028435952299413210",
+    "bot": "6030400221232501136",
+    "eye": "6037397706505195857",
+    "send_up": "5963103826075456248",
+    "download": "6039802767931871481",
+    "gift": "6032644646587338669",
+    "clock": "5983150113483134607",
+    "media": "6035128606563241721",
+    "wallet": "5769126056262898415",
+    "box": "5884479287171485878",
+    "calendar": "5890937706803894250",
+    "tag": "5886285355279193209",
+    "refresh": "5345906554510012647",
+    "back": "5893057118545646106",
+}
+
+
+def tg_emoji(icon_id: str, fallback: str) -> str:
+    return f'<tg-emoji emoji-id="{icon_id}">{fallback}</tg-emoji>'
+
+
+def ixb(text: str, *, callback_data: str | None = None, url: str | None = None, icon_id: str | None = None) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=callback_data, url=url, icon_custom_emoji_id=icon_id)
+
 # ── Лимиты запросов ─────────────────────────────────────────────
 # Быстрые запросы убраны — все модели используют единый счётчик pro_used
 
@@ -1669,20 +1707,14 @@ async def _accept_terms_cb(callback: CallbackQuery):
 @dp.message(Command("info"))
 async def cmd_info(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text="🔒 Политика конфиденциальности",
-            url=TERMS_URL_PRIVACY,
-        )],
-        [InlineKeyboardButton(
-            text="📋 Пользовательское соглашение",
-            url=TERMS_URL_AGREEMENT,
-        )],
+        [ixb(text="Политика конфиденциальности", url=TERMS_URL_PRIVACY, icon_id=PE["lock"])],
+        [ixb(text="Пользовательское соглашение", url=TERMS_URL_AGREEMENT, icon_id=PE["file"])],
     ])
     await message.answer(
-        "💡 <b>Помощь и контакты</b>\n\n"
+        f"{tg_emoji(PE['info'], 'ℹ')} <b>Помощь и контакты</b>\n\n"
         "Если есть вопросы — пишите @helphuza\n\n"
-        "🔒 Политика конфиденциальности\n"
-        "📋 Пользовательское соглашение",
+        f"{tg_emoji(PE['lock'], '🔒')} Политика конфиденциальности\n"
+        f"{tg_emoji(PE['file'], '📁')} Пользовательское соглашение",
         parse_mode="HTML",
         reply_markup=kb,
     )
@@ -1932,8 +1964,8 @@ async def require_subscription(message_or_callback):
             ch_title = chat.title or f"@{ch}"
         except Exception:
             ch_title = f"@{ch}"
-        buttons.append([InlineKeyboardButton(text=f"📢 {ch_title}", url=ch_link)])
-    buttons.append([InlineKeyboardButton(text="✅ Я подписался — проверить", callback_data="check_sub")])
+        buttons.append([ixb(text=ch_title, url=ch_link, icon_id=PE["megaphone"])])
+    buttons.append([ixb(text="Проверить подписку", callback_data="check_sub", icon_id=PE["ok"])])
 
     text = (
         "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
@@ -1982,8 +2014,8 @@ async def check_sub_callback(callback: CallbackQuery):
                 ch_title = chat.title or f"@{ch}"
             except Exception:
                 ch_title = f"@{ch}"
-            buttons.append([InlineKeyboardButton(text=f"📢 {ch_title}", url=ch_link)])
-        buttons.append([InlineKeyboardButton(text="✅ Я подписался — проверить", callback_data="check_sub")])
+            buttons.append([ixb(text=ch_title, url=ch_link, icon_id=PE["megaphone"])])
+        buttons.append([ixb(text="Проверить подписку", callback_data="check_sub", icon_id=PE["ok"])])
         await callback.answer("❌ Вы ещё не подписались!", show_alert=True)
         await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
@@ -3692,25 +3724,25 @@ def main_reply_kb(uid: int) -> ReplyKeyboardMarkup:
 
 
 def home_kb(uid: int) -> InlineKeyboardMarkup:
-    sub_text = "💎 Подписка ✅" if has_active_sub(uid) else "💎 Купить подписку"
+    sub_text = "Подписка активна" if has_active_sub(uid) else "Купить подписку"
     built = [
         [
-            InlineKeyboardButton(text="💬 Написать",          callback_data="menu_ask"),
-            InlineKeyboardButton(text="👤 Профиль",           callback_data="menu_profile"),
+            ixb(text="Написать", callback_data="menu_ask", icon_id=PE["send_up"]),
+            ixb(text="Профиль", callback_data="menu_profile", icon_id=PE["profile"]),
         ],
         [
-            InlineKeyboardButton(text="🎨 Картинки · Видео",  callback_data="menu_extra"),
+            ixb(text="Картинки и видео", callback_data="menu_extra", icon_id=PE["media"]),
         ],
         [
-            InlineKeyboardButton(text="🧹 Очистить память",   callback_data="clear_memory"),
+            ixb(text="Очистить память", callback_data="clear_memory", icon_id=PE["cross"]),
         ],
         [
-            InlineKeyboardButton(text="💬 Поддержка",         callback_data="menu_support"),
-            InlineKeyboardButton(text=sub_text,               callback_data="sub_menu"),
+            ixb(text="Поддержка", callback_data="menu_support", icon_id=PE["info"]),
+            ixb(text=sub_text, callback_data="sub_menu", icon_id=PE["lock"]),
         ],
     ]
     if uid in ADMIN_IDS:
-        built.append([InlineKeyboardButton(text="⚙️ Админ", callback_data="menu_admin")])
+        built.append([ixb(text="Админ", callback_data="menu_admin", icon_id=PE["settings"])])
     return InlineKeyboardMarkup(inline_keyboard=built)
 
 
@@ -4495,10 +4527,10 @@ async def menu_video_cb(callback: CallbackQuery):
         "▾ <b>Выбери режим:</b>"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ С улучшением ИИ",     callback_data="video_mode_ai"),
-         InlineKeyboardButton(text="✍️ Свой промпт (точно)", callback_data="video_mode_raw")],
-        [InlineKeyboardButton(text="🖼 Оживить фото",        callback_data="video_mode_photo")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_extra")],
+        [ixb(text="С улучшением ИИ", callback_data="video_mode_ai", icon_id=PE["bot"]),
+         ixb(text="Свой промпт", callback_data="video_mode_raw", icon_id=PE["tag"])],
+        [ixb(text="Оживить фото", callback_data="video_mode_photo", icon_id=PE["media"])],
+        [ixb(text="Назад", callback_data="back_extra", icon_id=PE["back"])],
     ])
     try:
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
@@ -4543,7 +4575,7 @@ async def cb_video_mode(callback: CallbackQuery):
     await callback.message.edit_text(
         text, parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="◀️ Назад", callback_data="menu_video")
+            ixb(text="Назад", callback_data="menu_video", icon_id=PE["back"])
         ]])
     )
     await callback.answer()
@@ -13000,15 +13032,15 @@ async def admin_svc_toggle(callback: CallbackQuery):
 async def admin_broadcast_cb(callback: CallbackQuery):
     uid = callback.from_user.id
     if uid not in ADMIN_IDS:
-        return await callback.answer("❌ Нет доступа", show_alert=True)
+        return await callback.answer("Нет доступа", show_alert=True)
     admin_await[uid] = {"action": "broadcast"}
     await callback.message.edit_text(
-        "📢 <b>Рассылка</b>\n\n"
+        f"{tg_emoji(PE['megaphone'], '📣')} <b>Рассылка</b>\n\n"
         "Отправь текст <i>(или фото с подписью)</i> — разошлю всем пользователям.\n\n"
         "Поддерживается HTML-разметка.",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="❌ Отмена", callback_data="menu_admin"),
+            ixb(text="Отмена", callback_data="menu_admin", icon_id=PE["cross"]),
         ]]),
     )
     await callback.answer()
