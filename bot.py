@@ -262,7 +262,7 @@ async def check_service(msg_or_cb, key: str) -> bool:
         return True
     text = SERVICE_DISABLED_MSG.get(key, "🚫 Сервис временно недоступен.")
     kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="🏠 Главная", callback_data="back_home")
+        InlineKeyboardButton(text="Главная", callback_data="back_home", icon_custom_emoji_id="5873147866364514353")
     ]])
     if isinstance(msg_or_cb, Message):
         await msg_or_cb.answer(text, parse_mode="HTML", reply_markup=kb)
@@ -1100,9 +1100,9 @@ async def db_load_subscriptions():
 def sub_buy_kb() -> InlineKeyboardMarkup:
     """Клавиатура выбора тарифа при покупке."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡ 7 дней — 60 ₽",  callback_data="sub_buy_week")],
-        [InlineKeyboardButton(text="💎 30 дней — 100 ₽", callback_data="sub_buy_month")],
-        [InlineKeyboardButton(text="🏠 Назад",           callback_data="back_home")],
+        [InlineKeyboardButton(text="7 дней — 60 ₽",  callback_data="sub_buy_week",  icon_custom_emoji_id="5904462880941545555")],
+        [InlineKeyboardButton(text="30 дней — 100 ₽", callback_data="sub_buy_month", icon_custom_emoji_id="5904462880941545555")],
+        [InlineKeyboardButton(text="Назад",           callback_data="back_home",     icon_custom_emoji_id="5893057118545646106")],
     ])
 
 
@@ -1111,10 +1111,11 @@ def sub_confirm_kb(plan_key: str) -> InlineKeyboardMarkup:
     plan = SUB_PLANS[plan_key]
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f"💳 Оплатить {plan['price']} ₽",
-            callback_data=f"sub_pay_{plan_key}"
+            text=f"Оплатить {plan['price']} ₽",
+            callback_data=f"sub_pay_{plan_key}",
+            icon_custom_emoji_id="5879814368572478751"
         )],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="sub_menu")],
+        [InlineKeyboardButton(text="Назад", callback_data="sub_menu", icon_custom_emoji_id="5893057118545646106")],
     ])
 
 
@@ -1136,21 +1137,21 @@ def _terms_kb() -> InlineKeyboardMarkup:
     """Клавиатура сообщения о соглашении."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🔒 Политика",   url=TERMS_URL_PRIVACY),
-            InlineKeyboardButton(text="📋 Соглашение", url=TERMS_URL_AGREEMENT),
+            InlineKeyboardButton(text="Политика",   url=TERMS_URL_PRIVACY,   icon_custom_emoji_id="6037249452824072506"),
+            InlineKeyboardButton(text="Соглашение", url=TERMS_URL_AGREEMENT, icon_custom_emoji_id="5870528606328852614"),
         ],
         [
-            InlineKeyboardButton(text="✅ Принимаю", callback_data="accept_terms"),
+            InlineKeyboardButton(text="Принимаю", callback_data="accept_terms", icon_custom_emoji_id="5870633910337015697"),
         ],
     ])
 
 
 TERMS_TEXT = (
-    "🔒 <b>Прежде чем продолжить, ознакомьтесь с документами:</b>\n\n"
-    "📋 Пользовательское соглашение\n"
-    "🔒 Политика конфиденциальности\n\n"
-    "Нажимая кнопку «Принимаю», вы соглашаетесь с условиями.\n\n"
-    "💡 <b>Помощь:</b> @helphuza"
+    '<tg-emoji emoji-id="6037249452824072506">🔒</tg-emoji> <b>Прежде чем продолжить, ознакомьтесь с документами:</b>\n\n'
+    '<tg-emoji emoji-id="5870528606328852614">📁</tg-emoji> Пользовательское соглашение\n'
+    '<tg-emoji emoji-id="6037249452824072506">🔒</tg-emoji> Политика конфиденциальности\n\n'
+    'Нажимая кнопку «Принимаю», вы соглашаетесь с условиями.\n\n'
+    '<tg-emoji emoji-id="6028435952299413210">ℹ</tg-emoji> <b>Помощь:</b> @helphuza'
 )
 
 
@@ -11747,7 +11748,7 @@ async def cb_pay_platega(callback: CallbackQuery):
     await callback.message.edit_text("⏳ Создаю платёж через Platega...")
 
     import time as _time
-    order_id = f"huza_{plan_key}_{uid}_{int(_time.time())}"
+    order_id = f"sub_{plan_key}_{uid}_{int(_time.time())}"
     bot_info  = await bot.get_me()
     return_url = f"https://t.me/{bot_info.username}?start=sub_check"
 
@@ -11758,10 +11759,11 @@ async def cb_pay_platega(callback: CallbackQuery):
         "order_id":    order_id,
         "description": f"ХУЗА AI — {plan['name']} ({plan['days']} дней)",
         "customer":    {"uid": str(uid)},
+        "payload":     f"sub_{plan_key}_{uid}",
         "meta":        {"plan": plan_key, "uid": uid},
         "success_url": return_url,
         "fail_url":    return_url,
-        "webhook_url": f"https://huzaoobo-production.up.railway.app/platega_webhook",
+        "webhook_url": f"https://huzaoobo-production.up.railway.app/platega_callback",
     }
     headers = {
         "Content-Type":  "application/json",
@@ -11794,16 +11796,16 @@ async def cb_pay_platega(callback: CallbackQuery):
 
         logging.info(f"[PLATEGA] Платёж создан uid={uid} order={order_id} link={redirect}")
         await callback.message.edit_text(
-            f"✅ <b>Платёж создан!</b>\n\n"
-            f"◆ Тариф — <b>{plan['name']}</b>\n"
-            f"◆ Цена — <b>{plan['price']} ₽</b>\n"
-            f"◆ Заказ — <code>{order_id}</code>\n\n"
-            f"👇 Нажми кнопку ниже для оплаты.\n"
-            f"После оплаты подписка активируется автоматически.",
+            f'<tg-emoji emoji-id="5870633910337015697">✅</tg-emoji> <b>Платёж создан!</b>\n\n'
+            f'<tg-emoji emoji-id="5886285355279193209">🏷</tg-emoji> Тариф — <b>{plan["name"]}</b>\n'
+            f'<tg-emoji emoji-id="5904462880941545555">🪙</tg-emoji> Цена — <b>{plan["price"]} ₽</b>\n'
+            f'<tg-emoji emoji-id="5870528606328852614">📁</tg-emoji> Заказ — <code>{order_id}</code>\n\n'
+            f'Нажми кнопку ниже для оплаты.\n'
+            f'После оплаты подписка активируется автоматически.',
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💳 Оплатить через Platega", url=redirect)],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data=f"sub_buy_{plan_key}")],
+                [InlineKeyboardButton(text="Оплатить через Platega", url=redirect, icon_custom_emoji_id="5879814368572478751")],
+                [InlineKeyboardButton(text="Назад", callback_data=f"sub_buy_{plan_key}", icon_custom_emoji_id="5893057118545646106")],
             ]),
         )
     except Exception as e:
@@ -11909,16 +11911,21 @@ async def successful_payment_handler(message: Message):
     # Сохраняем в БД
     asyncio.create_task(db_save_subscription(uid))
 
+    # Обновляем лимиты сразу после активации
+    _init_limits(uid)
+    _refresh_limits(uid)
+    asyncio.create_task(db_save_user(uid))
+
     # Логируем транзакцию
     charge_id = payment.provider_payment_charge_id
     logging.info(f"[PAYMENT] uid={uid} plan={plan_key} charge_id={charge_id} amount={payment.total_amount/100}₽")
 
     await message.answer(
-        f"✅ <b>Оплата прошла успешно!</b>\n\n"
-        f"💎 Тариф: <b>{plan['name']}</b>\n"
-        f"📅 Действует до: <b>{new_exp.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
-        f"Теперь тебе доступны все модели и расширенные лимиты!\n"
-        f"Приятного использования 🚀",
+        f'<tg-emoji emoji-id="5870633910337015697">✅</tg-emoji> <b>Оплата прошла успешно!</b>\n\n'
+        f'<tg-emoji emoji-id="5904462880941545555">🪙</tg-emoji> Тариф: <b>{plan["name"]}</b>\n'
+        f'<tg-emoji emoji-id="5890937706803894250">📅</tg-emoji> Действует до: <b>{new_exp.strftime("%d.%m.%Y %H:%M")}</b>\n\n'
+        f'Теперь тебе доступны все модели и расширенные лимиты!\n'
+        f'<tg-emoji emoji-id="6041731551845159060">🎉</tg-emoji> Приятного использования!',
         parse_mode="HTML",
         reply_markup=home_kb(uid),
     )
@@ -11928,11 +11935,11 @@ async def successful_payment_handler(message: Message):
         try:
             await bot.send_message(
                 admin_id,
-                f"💰 <b>Новая оплата!</b>\n\n"
-                f"👤 uid: <code>{uid}</code>\n"
-                f"📋 Тариф: <b>{plan['name']}</b>\n"
-                f"💵 Сумма: <b>{payment.total_amount / 100} ₽</b>\n"
-                f"🔑 Charge ID: <code>{charge_id}</code>",
+                f'<tg-emoji emoji-id="5904462880941545555">🪙</tg-emoji> <b>Новая оплата!</b>\n\n'
+                f'<tg-emoji emoji-id="5870994129244131212">👤</tg-emoji> uid: <code>{uid}</code>\n'
+                f'<tg-emoji emoji-id="5886285355279193209">🏷</tg-emoji> Тариф: <b>{plan["name"]}</b>\n'
+                f'<tg-emoji emoji-id="5890848474563352982">🪙</tg-emoji> Сумма: <b>{payment.total_amount / 100} ₽</b>\n'
+                f'<tg-emoji emoji-id="5870528606328852614">📁</tg-emoji> Charge ID: <code>{charge_id}</code>',
                 parse_mode="HTML",
             )
         except Exception:
@@ -11958,11 +11965,11 @@ async def admin_subs_panel(callback: CallbackQuery):
         "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="➕ Выдать подписку",   callback_data="admin_sub_give")],
-            [InlineKeyboardButton(text="➖ Забрать подписку",  callback_data="admin_sub_take")],
-            [InlineKeyboardButton(text="🔍 Проверить подписку", callback_data="admin_sub_check")],
-            [InlineKeyboardButton(text="📋 Список подписчиков", callback_data="admin_sub_list")],
-            [InlineKeyboardButton(text="◀️ Назад",             callback_data="menu_admin")],
+            [InlineKeyboardButton(text="Выдать подписку",    callback_data="admin_sub_give",  icon_custom_emoji_id="5870633910337015697")],
+            [InlineKeyboardButton(text="Забрать подписку",   callback_data="admin_sub_take",  icon_custom_emoji_id="5870657884844462243")],
+            [InlineKeyboardButton(text="Проверить подписку", callback_data="admin_sub_check", icon_custom_emoji_id="6037397706505195857")],
+            [InlineKeyboardButton(text="Список подписчиков", callback_data="admin_sub_list",  icon_custom_emoji_id="5870772616305839506")],
+            [InlineKeyboardButton(text="Назад",              callback_data="menu_admin",       icon_custom_emoji_id="5893057118545646106")],
         ]),
     )
     await callback.answer()
@@ -16950,6 +16957,10 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
     return aiohttp_web.Response(
         text=_j.dumps({
             "ok":             True,
+            # ── профиль пользователя ────────────────────────────────
+            "user_id":        uid,
+            "name":           prof.get("name", ""),
+            "username":       prof.get("username", ""),
             # ── лимиты (используются фронтом) ──────────────────────
             "pro_used":       li["pro_used"],
             "pro_max":        li["pro_max"],
@@ -17340,7 +17351,8 @@ async def api_pptx_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
 
         pptx_bytes = create_pptx_bytes(pptx_data, theme)
         for _ in range(3):
-            user_limits[uid]["pro_used"] = user_limits[uid].get("pro_used", 0) + 1
+            spend_limit(uid, "claude_opus")
+        asyncio.ensure_future(db_save_user(uid))
 
         actual_slides = len(pptx_data.get("slides", []))
         fname = f"Презентация_{topic[:25].replace(' ', '_')}.pptx"
@@ -17421,7 +17433,8 @@ async def api_webpptx_handler(request: aiohttp_web.Request) -> aiohttp_web.Respo
         html_bytes = html_str.encode("utf-8")
 
         for _ in range(3):
-            user_limits[uid]["pro_used"] = user_limits[uid].get("pro_used", 0) + 1
+            spend_limit(uid, "claude_opus")
+        asyncio.ensure_future(db_save_user(uid))
 
         safe_name = re.sub(r"[^\w\s-]", "", topic)[:25].strip().replace(" ", "_")
         fname = f"Презентация_{safe_name}.html"
@@ -17499,19 +17512,23 @@ async def platega_callback_handler(request: aiohttp_web.Request) -> aiohttp_web.
         new_exp = base + datetime.timedelta(days=plan["days"])
         user_subscriptions[uid] = {"expires": new_exp, "plan": plan_key}
         asyncio.create_task(db_save_subscription(uid))
+        # Обновляем лимиты сразу после активации подписки
+        _init_limits(uid)
+        _refresh_limits(uid)
+        asyncio.create_task(db_save_user(uid))
         logging.info(f"[PLATEGA CB] uid={uid} plan={plan_key} activated until {new_exp}")
 
         exp = sub_expires_str(uid)
         try:
             await bot.send_message(
                 uid,
-                f"✅ <b>Оплата прошла!</b>\n\n"
-                f"💎 Тариф: <b>{plan['name']}</b>\n"
-                f"📅 Активна до: <code>{exp}</code>\n\n"
-                f"Все возможности разблокированы. Приятного пользования!",
+                f'<tg-emoji emoji-id="5870633910337015697">✅</tg-emoji> <b>Оплата прошла!</b>\n\n'
+                f'<tg-emoji emoji-id="5904462880941545555">🪙</tg-emoji> Тариф: <b>{plan["name"]}</b>\n'
+                f'<tg-emoji emoji-id="5890937706803894250">📅</tg-emoji> Активна до: <code>{exp}</code>\n\n'
+                f'<tg-emoji emoji-id="6041731551845159060">🎉</tg-emoji> Все возможности разблокированы. Приятного пользования!',
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_home"),
+                    InlineKeyboardButton(text="Главное меню", callback_data="back_home", icon_custom_emoji_id="5873147866364514353"),
                 ]]),
             )
         except Exception as e:
@@ -17643,9 +17660,10 @@ async def api_report_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
         if not ans or len(ans.strip()) < 100:
             raise RuntimeError("Не удалось сгенерировать документ. Попробуй ещё раз.")
 
-        # Списываем 3 запроса
+        # Списываем 3 запроса через spend_limit (обновляет БД корректно)
         for _ in range(3):
-            user_limits[uid]["pro_used"] = user_limits[uid].get("pro_used", 0) + 1
+            spend_limit(uid, "claude_opus")
+        asyncio.ensure_future(db_save_user(uid))
 
         # Создаём docx
         path = await _create_report_docx(
