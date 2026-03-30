@@ -6,7 +6,7 @@ async def check_ip():
     async with aiohttp.ClientSession() as session:
         async with session.get("https://api.ipify.org") as resp:
             ip = await resp.text()
-            print("M1Y IP:", ip)
+            print("MY IP:", ip)
 from aiohttp import web as aiohttp_web
 import aiofiles
 import base64
