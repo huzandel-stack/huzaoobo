@@ -17205,15 +17205,23 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
         )
 
     _init_limits(uid)
+    _refresh_limits(uid)
     li   = get_limits_info(uid)
     prof = user_profiles.get(uid, {})
     sub_active = has_active_sub(uid)
     _sub_expires = sub_expires_str(uid) if sub_active else ""
     _sub_plan    = sub_plan_label(uid)
+
+    # FIX: правильные источники — generations из user_images_count, referrals из user_referrals
+    _total_gens     = user_images_count.get(uid, 0)
+    _referrals      = len(user_referrals.get(uid, {}).get("refs", []))
+    _total_requests = prof.get("requests", 0)
+    _level          = prof.get("level", 0)
+
     return aiohttp_web.Response(
         text=_j.dumps({
             "ok":             True,
-            # ── лимиты (используются фронтом) ──────────────────────
+            # ── лимиты ─────────────────────────────────────────────
             "pro_used":       li["pro_used"],
             "pro_max":        li["pro_max"],
             "fast_left":      0,
@@ -17225,25 +17233,25 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             "music_max":      li.get("music_max", 0),
             "video_used":     li.get("video_used", 0),
             "video_max":      li.get("video_max", 0),
-            # ── подписка (has_sub — именно то поле что читает фронт) ─
+            # ── подписка ───────────────────────────────────────────
             "has_sub":        sub_active,
             "sub_active":     sub_active,
             "sub_expires":    _sub_expires,
             "sub_plan":       _sub_plan,
             "plan":           _sub_plan,
             "expires":        _sub_expires,
-            # ── профиль ────────────────────────────────────────────
+            # ── профиль (FIX: правильные поля из правильных источников) ─
             "user_id":        uid,
             "name":           prof.get("name", ""),
             "username":       prof.get("username", ""),
-            "total_requests": prof.get("requests", 0),
-            "requests":       prof.get("requests", 0),
-            "total_gens":     prof.get("generations", 0),
-            "total_generations": prof.get("generations", 0),
+            "total_requests": _total_requests,
+            "requests":       _total_requests,
+            "total_gens":     _total_gens,        # FIX: user_images_count вместо prof["generations"]
+            "total_generations": _total_gens,     # FIX: user_images_count вместо prof["generations"]
             "join_date":      prof.get("joined", ""),
             "terms_accepted": await _has_accepted(uid),
-            "referrals":      prof.get("referrals", 0),
-            "level":          prof.get("level", 0),
+            "referrals":      _referrals,          # FIX: user_referrals вместо prof["referrals"]
+            "level":          _level,
             "level_max":      50,
             "reset_in":       li.get("reset_in", ""),
             "model":          MODELS.get(user_models.get(uid, DEFAULT_MODEL), {}).get("label", ""),
