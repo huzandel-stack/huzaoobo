@@ -17233,9 +17233,13 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             "plan":           _sub_plan,
             "expires":        _sub_expires,
             # ── профиль ────────────────────────────────────────────
+            "user_id":        uid,
+            "name":           prof.get("name", ""),
+            "username":       prof.get("username", ""),
             "total_requests": prof.get("requests", 0),
             "requests":       prof.get("requests", 0),
             "total_gens":     prof.get("generations", 0),
+            "total_generations": prof.get("generations", 0),
             "join_date":      prof.get("joined", ""),
             "terms_accepted": await _has_accepted(uid),
             "referrals":      prof.get("referrals", 0),
