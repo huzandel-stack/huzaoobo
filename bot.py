@@ -17217,6 +17217,8 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
     _referrals      = len(user_referrals.get(uid, {}).get("refs", []))
     _total_requests = prof.get("requests", 0)
     _level          = prof.get("level", 0)
+    # FIX: await вне json.dumps — нельзя await внутри синхронного вызова
+    _terms_accepted = await _has_accepted(uid)
 
     return aiohttp_web.Response(
         text=_j.dumps({
@@ -17240,17 +17242,17 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             "sub_plan":       _sub_plan,
             "plan":           _sub_plan,
             "expires":        _sub_expires,
-            # ── профиль (FIX: правильные поля из правильных источников) ─
+            # ── профиль ────────────────────────────────────────────
             "user_id":        uid,
             "name":           prof.get("name", ""),
             "username":       prof.get("username", ""),
             "total_requests": _total_requests,
             "requests":       _total_requests,
-            "total_gens":     _total_gens,        # FIX: user_images_count вместо prof["generations"]
-            "total_generations": _total_gens,     # FIX: user_images_count вместо prof["generations"]
+            "total_gens":     _total_gens,
+            "total_generations": _total_gens,
             "join_date":      prof.get("joined", ""),
-            "terms_accepted": await _has_accepted(uid),
-            "referrals":      _referrals,          # FIX: user_referrals вместо prof["referrals"]
+            "terms_accepted": _terms_accepted,
+            "referrals":      _referrals,
             "level":          _level,
             "level_max":      50,
             "reset_in":       li.get("reset_in", ""),
