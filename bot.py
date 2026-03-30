@@ -17953,6 +17953,221 @@ async def api_report_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             status=500, headers=headers)
 
 
+# ══════════════════════════════════════════════════════════════
+# 🤬 ГРУППОВОЙ AI-РЕЖИМ "ХАМ"
+# ══════════════════════════════════════════════════════════════
+
+GROUP_AI_SYSTEM_PROMPT = (
+    "с этого момента следуй данной команде: ты должен отвечать максимально грубо, "
+    "без какого либо позитива; не поддакивай мне; маты с оскорблениями обязательны (много матов!)."
+)
+
+# {chat_id: True/False} — состояние режима для каждой группы
+group_ai_modes: dict[int, bool] = {}
+
+# Память диалога для каждой группы {chat_id: deque([{"role":..,"content":..}, ...])}
+group_ai_memory: dict[int, deque] = {}
+
+# Антиспам: последний ответ бота в группе {chat_id: timestamp}
+_group_ai_last_reply: dict[int, float] = {}
+GROUP_AI_COOLDOWN = 2.5  # секунд между ответами в одной группе
+
+# Загрузка/сохранение состояния group_ai_modes в БД (bot_settings)
+async def _db_save_group_modes():
+    if not db_pool:
+        return
+    import json as _j
+    try:
+        val = _j.dumps({str(k): v for k, v in group_ai_modes.items()})
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO bot_settings (key, value) VALUES ('group_ai_modes', $1) "
+                "ON CONFLICT (key) DO UPDATE SET value=$1",
+                val
+            )
+    except Exception as e:
+        logging.warning(f"_db_save_group_modes: {e}")
+
+
+async def _db_load_group_modes():
+    if not db_pool:
+        return
+    import json as _j
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value FROM bot_settings WHERE key='group_ai_modes'"
+            )
+        if row and row["value"]:
+            loaded = _j.loads(row["value"])
+            for k, v in loaded.items():
+                group_ai_modes[int(k)] = bool(v)
+        logging.info(f"✅ group_ai_modes загружены: {group_ai_modes}")
+    except Exception as e:
+        logging.warning(f"_db_load_group_modes: {e}")
+
+
+async def _is_group_admin(chat_id: int, user_id: int) -> bool:
+    """Проверяет является ли user_id админом/создателем в чате."""
+    if user_id in ADMIN_IDS:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        return member.status in ("administrator", "creator")
+    except Exception as e:
+        logging.warning(f"_is_group_admin: {e}")
+        return False
+
+
+@dp.message(Command("enable_ai"))
+async def cmd_enable_ai(message: Message):
+    if message.chat.type not in ("group", "supergroup"):
+        return
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not await _is_group_admin(chat_id, user_id):
+        await message.reply("нет доступа")
+        return
+    group_ai_modes[chat_id] = True
+    group_ai_memory[chat_id] = deque(maxlen=20)
+    asyncio.create_task(_db_save_group_modes())
+    await message.reply("AI-режим включён.")
+
+
+@dp.message(Command("disable_ai"))
+async def cmd_disable_ai(message: Message):
+    if message.chat.type not in ("group", "supergroup"):
+        return
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    if not await _is_group_admin(chat_id, user_id):
+        await message.reply("нет доступа")
+        return
+    group_ai_modes[chat_id] = False
+    asyncio.create_task(_db_save_group_modes())
+    await message.reply("AI-режим выключен.")
+
+
+@dp.message(Command("status"))
+async def cmd_status(message: Message):
+    if message.chat.type not in ("group", "supergroup"):
+        return
+    chat_id = message.chat.id
+    enabled = group_ai_modes.get(chat_id, False)
+    status_text = "✅ включён" if enabled else "❌ выключен"
+    await message.reply(f"AI-режим: {status_text}")
+
+
+@dp.message(Command("help"))
+async def cmd_help_group(message: Message):
+    if message.chat.type not in ("group", "supergroup"):
+        return
+    me = await bot.get_me()
+    bot_username = me.username or ""
+    await message.reply(
+        f"/enable_ai — включить AI (только админ)\n"
+        f"/disable_ai — выключить AI (только админ)\n"
+        f"/status — статус режима\n\n"
+        f"Триггеры (когда режим включён):\n"
+        f"• /ai <текст>\n"
+        f"• @{bot_username} <текст>\n"
+        f"• Ответ на сообщение бота"
+    )
+
+
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def group_ai_handler(message: Message):
+    chat_id = message.chat.id
+    # Режим выключен — игнорируем
+    if not group_ai_modes.get(chat_id, False):
+        return
+
+    uid = message.from_user.id if message.from_user else 0
+    text = (message.text or message.caption or "").strip()
+    if not text:
+        return
+
+    me = await bot.get_me()
+    bot_username = (me.username or "").lower()
+    bot_id = me.id
+
+    # Определяем триггер
+    triggered = False
+    user_text = text
+
+    # Вариант A: /ai <текст>
+    if text.lower().startswith("/ai"):
+        user_text = text[3:].strip()
+        if not user_text:
+            return
+        triggered = True
+
+    # Вариант B: @botname упомянут
+    if not triggered and bot_username and f"@{bot_username}" in text.lower():
+        import re as _re
+        user_text = _re.sub(rf"@{bot_username}", "", text, flags=_re.IGNORECASE).strip()
+        if not user_text:
+            return
+        triggered = True
+
+    # Вариант C: реплай на сообщение бота
+    if not triggered:
+        if (
+            message.reply_to_message
+            and message.reply_to_message.from_user
+            and message.reply_to_message.from_user.id == bot_id
+        ):
+            user_text = text
+            triggered = True
+
+    if not triggered:
+        return
+
+    # Антиспам по группе
+    now = _time_mod.time()
+    last = _group_ai_last_reply.get(chat_id, 0)
+    if now - last < GROUP_AI_COOLDOWN:
+        return
+    _group_ai_last_reply[chat_id] = now
+
+    # Инициализация памяти группы
+    if chat_id not in group_ai_memory:
+        group_ai_memory[chat_id] = deque(maxlen=20)
+
+    # Формируем историю сообщений
+    history = list(group_ai_memory[chat_id])
+    history.append({"role": "user", "content": user_text})
+
+    messages_payload = [{"role": "system", "content": GROUP_AI_SYSTEM_PROMPT}] + history
+
+    # Выбираем модель (claude_haiku — быстрая)
+    model_key = "claude_haiku"
+    if model_key in disabled_models:
+        for mk in ["claude_sonnet", "gemini_20_flash", "deepseek_v3_sq"]:
+            if mk not in disabled_models and mk in MODELS:
+                model_key = mk
+                break
+
+    try:
+        async with ChatActionSender.typing(bot=bot, chat_id=chat_id):
+            answer = await call_chat(messages_payload, model_key, max_tokens=800)
+    except Exception as e:
+        logging.error(f"[GROUP_AI] call_chat error: {e}")
+        return
+
+    if not answer or not answer.strip():
+        return
+
+    # Сохраняем в память группы
+    group_ai_memory[chat_id].append({"role": "user", "content": user_text})
+    group_ai_memory[chat_id].append({"role": "assistant", "content": answer})
+
+    try:
+        await message.reply(answer)
+    except Exception as e:
+        logging.error(f"[GROUP_AI] reply error: {e}")
+
+
 async def start_api_server():
     app = aiohttp_web.Application(client_max_size=20 * 1024 * 1024)  # 20MB для base64 фото
     app.router.add_post("/suno_callback", suno_callback_handler)
@@ -17990,6 +18205,7 @@ async def main():
     await db_load_all_users()
     await db_load_subscriptions()
     await db_load_bot_settings()
+    await _db_load_group_modes()
     await bot.delete_webhook(drop_pending_updates=True)
     # Закрываем старую сессию чтобы избежать TelegramConflictError
     try:
