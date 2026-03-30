@@ -17256,7 +17256,7 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             "level":          _level,
             "level_max":      50,
             "reset_in":       li.get("reset_in", ""),
-            "model":          MODELS.get(user_models.get(uid, DEFAULT_MODEL), {}).get("label", ""),
+            "model":          MODELS.get(get_model_key(uid), {}).get("label", ""),
             "mode":           user_features.get(uid, {}).get("answer_mode", "fast"),
         }, ensure_ascii=False),
         headers=headers
