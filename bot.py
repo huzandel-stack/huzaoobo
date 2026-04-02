@@ -3995,42 +3995,55 @@ def home_kb(uid: int) -> InlineKeyboardMarkup:
 
 
 def ai_menu_kb(uid: int = 0) -> InlineKeyboardMarkup:
-    auto_on = user_features.get(uid, {}).get("auto_model", False)
-    cur_mk  = get_model_key(uid)
-    auto_label = "⚡ Авто ✅" if cur_mk == "auto" else "⚡ Авто"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=auto_label,
-            callback_data="set_auto"
-        )],
-        [InlineKeyboardButton(
-            text=f"🤖 Авто-выбор · {'вкл' if auto_on else 'выкл'}",
-            callback_data="toggle_auto_model"
-        )],
-        [
-            InlineKeyboardButton(text="🔵 Claude",     callback_data="cat_claude"),
-            InlineKeyboardButton(text="🟢 GPT",        callback_data="cat_gpt"),
-        ],
-        [
-            InlineKeyboardButton(text="🧬 DeepSeek",   callback_data="cat_deepseek"),
-            InlineKeyboardButton(text="🌐 Qwen",       callback_data="cat_qwen"),
-        ],
-        [
-            InlineKeyboardButton(text="⚙️ Command",    callback_data="cat_command"),
-            InlineKeyboardButton(text="🔮 Kimi & GLM", callback_data="cat_kimi_glm"),
-        ],
-        [
-            InlineKeyboardButton(text="🌀 C4AI",       callback_data="cat_c4ai"),
-            InlineKeyboardButton(text="🎨 Генерация",  callback_data="menu_imggen"),
-        ],
-        [
-            InlineKeyboardButton(text="🔵 Gemini",     callback_data="cat_gemini"),
-            InlineKeyboardButton(text="🌐 Sonar (веб)", callback_data="cat_sonar"),
-        ],
-        [
-            InlineKeyboardButton(text="🏠 Главная",    callback_data="menu_home"),
-        ],
+    """Единое меню выбора модели: Авто / Бесплатные / Платные — как в Mini App."""
+    cur_mk = get_model_key(uid)
+    has_sub = has_active_sub(uid)
+    rows = []
+
+    # ── Группа 1: Авто ────────────────────────────────────────────
+    auto_active = (cur_mk == "auto")
+    auto_text = "✅ ⚡ Авто" if auto_active else "⚡ Авто"
+    rows.append([InlineKeyboardButton(text=auto_text, callback_data="set_auto")])
+
+    # ── Группа 2: Бесплатные ──────────────────────────────────────
+    rows.append([InlineKeyboardButton(text="─── 🆓 Бесплатные ───", callback_data="noop_free")])
+    free_keys = [k for k, v in MODELS.items() if k != "auto" and not v.get("premium") and k not in disabled_models]
+    # Пары по 2 в ряд
+    free_pairs = [free_keys[i:i+2] for i in range(0, len(free_keys), 2)]
+    for pair in free_pairs:
+        row = []
+        for k in pair:
+            m = MODELS[k]
+            is_active = (k == cur_mk)
+            lbl = ("✅ " if is_active else "") + m["label"]
+            row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
+        rows.append(row)
+
+    # ── Группа 3: Платные ─────────────────────────────────────────
+    paid_keys = [k for k, v in MODELS.items() if k != "auto" and v.get("premium") and k not in disabled_models]
+    if paid_keys:
+        rows.append([InlineKeyboardButton(text="─── 🔥 Платные ───", callback_data="noop_paid")])
+        paid_pairs = [paid_keys[i:i+2] for i in range(0, len(paid_keys), 2)]
+        for pair in paid_pairs:
+            row = []
+            for k in pair:
+                m = MODELS[k]
+                is_active = (k == cur_mk)
+                if has_sub:
+                    lbl = ("✅ " if is_active else "") + m["label"]
+                else:
+                    lbl = "🔒 " + m["label"]
+                row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
+            rows.append(row)
+
+    # ── Навигация ─────────────────────────────────────────────────
+    rows.append([
+        InlineKeyboardButton(text="🎨 Генерация картинок", callback_data="menu_imggen"),
     ])
+    rows.append([
+        InlineKeyboardButton(text="🏠 Главная", callback_data="menu_home"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def category_kb(cat_key: str, uid: int = 0) -> InlineKeyboardMarkup:
@@ -4312,11 +4325,12 @@ async def cmd_model(message: Message):
     await message.answer(
         premium_html(
             "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-            "🤖 <b>НЕЙРОСЕТЬ</b>\n"
+            "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
             "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
             f"◈ Активная — <code>{cur}</code>\n"
-            "◈ Vision 📸 — анализирует фото\n\n"
-            "▾ Выбери категорию\n"
+            "◈ 🔒 — только с подпиской\n"
+            "◈ 📸 — поддерживает анализ фото\n\n"
+            "▾ Выбери модель\n"
             "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
         ),
         parse_mode="HTML", reply_markup=ai_menu_kb(uid)
@@ -11648,6 +11662,12 @@ async def set_answer_mode_cb(callback: CallbackQuery):
     await _show_profile(callback, uid)
 
 
+@dp.callback_query(F.data.startswith("noop_"))
+async def noop_cb(callback: CallbackQuery):
+    """Разделители в меню — просто игнорируем нажатие."""
+    await callback.answer()
+
+
 @dp.callback_query(F.data == "toggle_auto_model")
 async def toggle_auto_model_cb(callback: CallbackQuery):
     """Переключить авто-выбор модели."""
@@ -11799,20 +11819,26 @@ async def menu_ai(callback: CallbackQuery):
     if not await require_subscription(callback):
         return
     mk  = get_model_key(uid)
-    cur = MODELS.get(mk, {}).get("label", mk) if not mk.startswith("imggen:") else "🎨 " + IMG_MODELS[mk.split(":")[1]]["label"]
+    if mk == "auto":
+        cur = "⚡ Авто"
+    elif mk.startswith("imggen:"):
+        cur = "🎨 " + IMG_MODELS.get(mk.split(":")[1], {}).get("label", mk)
+    else:
+        cur = MODELS.get(mk, {}).get("label", mk)
+    text = premium_html(
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+        "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
+        "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
+        f"◈ Активная — <code>{cur}</code>\n"
+        "◈ 🔒 — только с подпиской\n"
+        "◈ 📸 — поддерживает анализ фото\n\n"
+        "▾ Выбери модель\n"
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
+    )
     try:
-        await callback.message.edit_text(
-            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-            "🤖 <b>НЕЙРОСЕТЬ</b>\n"
-            "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
-            f"◈ Активная — <code>{cur}</code>\n"
-            "◈ Vision 📸 — анализирует фото\n\n"
-            "▾ Выбери категорию\n"
-            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔",
-            parse_mode="HTML", reply_markup=ai_menu_kb(uid)
-        )
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=ai_menu_kb(uid))
     except Exception:
-        await callback.message.answer("🤖 <b>Нейросеть</b>", parse_mode="HTML", reply_markup=ai_menu_kb(uid))
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=ai_menu_kb(uid))
     await callback.answer()
 
 
@@ -13336,9 +13362,23 @@ async def back_home(callback: CallbackQuery):
 async def back_ai(callback: CallbackQuery):
     uid = callback.from_user.id
     mk  = get_model_key(uid)
-    cur = MODELS.get(mk, {}).get("label", mk) if not mk.startswith("imggen:") else "🎨 " + IMG_MODELS[mk.split(":")[1]]["label"]
+    if mk == "auto":
+        cur = "⚡ Авто"
+    elif mk.startswith("imggen:"):
+        cur = "🎨 " + IMG_MODELS.get(mk.split(":")[1], {}).get("label", mk)
+    else:
+        cur = MODELS.get(mk, {}).get("label", mk)
     await callback.message.edit_text(
-        f"⚡️ <b>Нейросети</b>\n\n🔹 Активная модель: <code>{cur}</code>\n\nВыбери категорию:",
+        premium_html(
+            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+            "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
+            "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
+            f"◈ Активная — <code>{cur}</code>\n"
+            "◈ 🔒 — только с подпиской\n"
+            "◈ 📸 — поддерживает анализ фото\n\n"
+            "▾ Выбери модель\n"
+            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
+        ),
         parse_mode="HTML", reply_markup=ai_menu_kb(uid),
     )
     await callback.answer()
@@ -13364,9 +13404,23 @@ async def open_category(callback: CallbackQuery):
 async def back_main(callback: CallbackQuery):
     uid = callback.from_user.id
     mk  = get_model_key(uid)
-    cur = MODELS.get(mk, {}).get("label", mk) if not mk.startswith("imggen:") else "🎨 " + IMG_MODELS[mk.split(":")[1]]["label"]
+    if mk == "auto":
+        cur = "⚡ Авто"
+    elif mk.startswith("imggen:"):
+        cur = "🎨 " + IMG_MODELS.get(mk.split(":")[1], {}).get("label", mk)
+    else:
+        cur = MODELS.get(mk, {}).get("label", mk)
     await callback.message.edit_text(
-        f"⚡️ <b>Нейросети</b>\n\n🔹 Активная модель: <code>{cur}</code>\n\nВыбери категорию:",
+        premium_html(
+            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+            "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
+            "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
+            f"◈ Активная — <code>{cur}</code>\n"
+            "◈ 🔒 — только с подпиской\n"
+            "◈ 📸 — поддерживает анализ фото\n\n"
+            "▾ Выбери модель\n"
+            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
+        ),
         parse_mode="HTML", reply_markup=ai_menu_kb(uid),
     )
     await callback.answer()
@@ -13404,31 +13458,32 @@ async def set_model(callback: CallbackQuery):
     m   = MODELS[key]
     if key == "auto":
         label = "⚡ Авто"
-        hint  = "\n🤖 <i>Модель выбирается автоматически под каждый запрос!</i>"
     else:
         label = m["label"]
-        vis   = m.get("vision", False)
-        hint  = "\n📸 <i>Можешь отправить фото для анализа!</i>" if vis else ""
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🤖 Сменить модель", callback_data="menu_ai")],
-        [InlineKeyboardButton(text="🧹 Очистить память", callback_data="clear_memory"),
-         InlineKeyboardButton(text="🏠 Главная",   callback_data="back_home")],
-    ])
+    # Показываем обновлённое меню с подсветкой выбранной модели
+    new_cur = label
+    menu_text = premium_html(
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+        "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
+        "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
+        f"◈ Активная — <code>{new_cur}</code>\n"
+        "◈ 🔒 — только с подпиской\n"
+        "◈ 📸 — поддерживает анализ фото\n\n"
+        "▾ Выбери модель\n"
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
+    )
     try:
-        await callback.message.edit_text(
-            f"✅ <b>Модель активирована!</b>\n\n"
-            f"🤖 {label}{hint}\n\n"
-            f"✏️ <b>Напиши свой вопрос прямо сейчас</b> — я отвечу!\n\n"
-            f"<i>Память очищена — начинаем новый диалог.</i>",
-            parse_mode="HTML",
-            reply_markup=kb,
-        )
+        await callback.message.edit_text(menu_text, parse_mode="HTML", reply_markup=ai_menu_kb(uid))
     except Exception:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🤖 Выбрать модель", callback_data="menu_ai")],
+            [InlineKeyboardButton(text="🏠 Главная", callback_data="back_home")],
+        ])
         await callback.message.answer(
-            f"✅ <b>{label} активирована!</b>{hint}\n\n✏️ Пиши вопрос:",
+            f"✅ <b>Модель изменена на {label}</b>\n\n✏️ Пиши вопрос:",
             parse_mode="HTML", reply_markup=kb
         )
-    await callback.answer(f"✅ {label} активирована!")
+    await callback.answer(f"✅ Модель изменена на {label}")
 
 
 @dp.callback_query(F.data.startswith("imgset_"))
