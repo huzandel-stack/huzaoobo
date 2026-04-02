@@ -648,6 +648,8 @@ BOT_NAME = os.getenv("BOT_NAME", "ХУЗА")
 # ==========================
 
 MODELS = {
+    # ⚡ Авто — модель по умолчанию (выбирает лучшую автоматически)
+    "auto": {"name": "auto", "provider": "sq", "label": "⚡ Авто", "vision": False, "premium": False},
     # Claude (добавлен vision)
     "claude_sonnet": {"name": "claude-sonnet-4-5",  "provider": "sq", "label": "🔷 Claude Sonnet 4.5 📸", "vision": True,  "premium": True},
     "claude_haiku":  {"name": "claude-haiku-4-5",   "provider": "sq", "label": "💎 Claude Haiku 4.5 📸",  "vision": True,  "premium": False},
@@ -681,6 +683,7 @@ MODELS = {
     "gemini_25_flash_lite": {"name": "gemini-2.5-flash-lite",      "provider": "sq", "label": "💡 Gemini 2.5 Flash Lite", "vision": False, "premium": False},
     "gemini_25_pro":        {"name": "gemini-2.5-pro",             "provider": "sq", "label": "💎 Gemini 2.5 Pro 📸",      "vision": True,  "premium": True},
     "gemini_3_flash":       {"name": "gemini-3-flash",             "provider": "sq", "label": "🚀 Gemini 3 Flash 📸",      "vision": True,  "premium": False},
+    "gemini_3_pro":         {"name": "gemini-3-pro",               "provider": "sq", "label": "🌟 Gemini 3 Pro 📸",        "vision": True,  "premium": True},
     # Perplexity Sonar (веб-поиск, через SQ)
     "sonar":                {"name": "sonar",                      "provider": "sq", "label": "🌐 Sonar (веб)",            "vision": False, "premium": False},
     "sonar_pro":            {"name": "sonar-pro",                  "provider": "sq", "label": "🌐 Sonar Pro (веб)",        "vision": False, "premium": True},
@@ -693,6 +696,10 @@ MODELS = {
 # 📂 КАТЕГОРИИ МОДЕЛЕЙ (для меню выбора нейросети)
 # ══════════════════════════════════════════════════════════════
 CATEGORIES: dict[str, tuple[str, list[str]]] = {
+    "cat_auto": (
+        "⚡ Авто",
+        ["auto"],
+    ),
     "cat_claude": (
         "🔵 Claude (Anthropic)",
         ["claude_opus", "claude_sonnet", "claude_haiku"],
@@ -723,7 +730,7 @@ CATEGORIES: dict[str, tuple[str, list[str]]] = {
     ),
     "cat_gemini": (
         "🔵 Gemini (Google)",
-        ["gemini_3_flash", "gemini_25_pro", "gemini_25_flash",
+        ["gemini_3_flash", "gemini_3_pro", "gemini_25_pro", "gemini_25_flash",
          "gemini_25_flash_lite", "gemini_20_flash", "gemini_20_flash_lite"],
     ),
     "cat_sonar": (
@@ -1202,6 +1209,15 @@ def auto_select_model(text: str = "", has_image: bool = False, has_doc: bool = F
     m = "claude_haiku" if "claude_haiku" not in disabled_models else "claude_sonnet"
     return m, f"⚡ Быстрый → {MODELS[m]['label']}"
 
+
+def resolve_model_key(uid: int, text: str = "", has_image: bool = False, has_doc: bool = False) -> str:
+    """Возвращает реальный ключ модели: если выбрано 'auto' — делает умный выбор."""
+    mk = get_model_key(uid)
+    if mk == "auto":
+        resolved, _ = auto_select_model(text=text, has_image=has_image, has_doc=has_doc)
+        return resolved
+    return mk
+
 promo_codes = {}
 promo_used  = {}
 
@@ -1537,7 +1553,7 @@ async def init_db():
                     name         TEXT        DEFAULT '',
                     username     TEXT        DEFAULT '',
                     joined       TEXT        DEFAULT '',
-                    model_key    TEXT        DEFAULT 'claude_haiku',
+                    model_key    TEXT        DEFAULT 'auto',
                     tokens       INT         DEFAULT 0,
                     images_count INT         DEFAULT 0,
                     last_refill  TIMESTAMPTZ DEFAULT NOW(),
@@ -1726,7 +1742,7 @@ async def db_load_all_users():
             rows = await conn.fetch("SELECT * FROM users")
         for row in rows:
             uid = row["uid"]
-            user_settings[uid]     = row["model_key"] or "claude_haiku"
+            user_settings[uid]     = row["model_key"] or "auto"
             user_images_count[uid] = row["images_count"] or 0
             lb = row["last_bonus"]
             if lb is not None and hasattr(lb, "replace"):
@@ -1961,11 +1977,11 @@ def tmp(fn: str) -> str:
 
 
 def get_model_key(uid: int) -> str:
-    return user_settings.get(uid, "claude_haiku")
+    return user_settings.get(uid, "auto")
 
 def get_chat_model(uid: int) -> str:
     """Возвращает текущую модель чата."""
-    return user_chat_models.get(uid, user_settings.get(uid, "claude_haiku"))
+    return user_chat_models.get(uid, user_settings.get(uid, "auto"))
 
 def set_chat_model(uid: int, key: str):
     """Устанавливает модель чата."""
@@ -2057,7 +2073,8 @@ def can_send(uid: int, model_key: str):
     _refresh_limits(uid)
     lim = user_limits[uid]
     L   = _get_lims(uid)
-    if model_key in PREMIUM_MODELS and not has_active_sub(uid):
+    # "auto" никогда не является премиум-моделью само по себе
+    if model_key != "auto" and model_key in PREMIUM_MODELS and not has_active_sub(uid):
         return False, "premium"
     if lim["pro_used"] >= L["pro_day"]:
         return False, "pro"
@@ -3979,7 +3996,13 @@ def home_kb(uid: int) -> InlineKeyboardMarkup:
 
 def ai_menu_kb(uid: int = 0) -> InlineKeyboardMarkup:
     auto_on = user_features.get(uid, {}).get("auto_model", False)
+    cur_mk  = get_model_key(uid)
+    auto_label = "⚡ Авто ✅" if cur_mk == "auto" else "⚡ Авто"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=auto_label,
+            callback_data="set_auto"
+        )],
         [InlineKeyboardButton(
             text=f"🤖 Авто-выбор · {'вкл' if auto_on else 'выкл'}",
             callback_data="toggle_auto_model"
@@ -4013,6 +4036,7 @@ def ai_menu_kb(uid: int = 0) -> InlineKeyboardMarkup:
 def category_kb(cat_key: str, uid: int = 0) -> InlineKeyboardMarkup:
     label, keys = CATEGORIES[cat_key]
     rows = []
+    cur_mk = get_model_key(uid)
     if cat_key == "cat_imggen":
         for k in keys:
             if k in disabled_img_models:
@@ -4021,14 +4045,20 @@ def category_kb(cat_key: str, uid: int = 0) -> InlineKeyboardMarkup:
             rows.append([InlineKeyboardButton(text=m["label"], callback_data=f"imgset_{k}")])
     else:
         for k in keys:
-            if k in disabled_models:
+            if k in disabled_models and k != "auto":
                 continue
             m = MODELS[k]
             is_premium = k in PREMIUM_MODELS
             needs_sub  = is_premium and not has_active_sub(uid)
-            lock = "🔒 " if needs_sub else ""
+            is_active  = (k == cur_mk)
+            if needs_sub:
+                btn_text = "🔒 " + m["label"]
+            elif is_active:
+                btn_text = "✅ " + m["label"]
+            else:
+                btn_text = m["label"]
             rows.append([InlineKeyboardButton(
-                text=lock + m["label"],
+                text=btn_text,
                 callback_data=f"set_{k}"
             )])
     rows.append([
@@ -4273,7 +4303,12 @@ async def cmd_model(message: Message):
     uid = message.from_user.id
     if not await require_subscription(message): return
     mk = get_model_key(uid)
-    cur = MODELS.get(mk, {}).get("label", mk) if not mk.startswith("imggen:") else "🎨 " + IMG_MODELS[mk.split(":")[1]]["label"]
+    if mk == "auto":
+        cur = "⚡ Авто"
+    elif mk.startswith("imggen:"):
+        cur = "🎨 " + IMG_MODELS[mk.split(":")[1]]["label"]
+    else:
+        cur = MODELS.get(mk, {}).get("label", mk)
     await message.answer(
         premium_html(
             "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
@@ -4313,14 +4348,19 @@ async def handle_web_app_data(message: Message):
         key = data.get("model", "")
         if key not in MODELS:
             await message.answer("❌ <b>Неизвестная модель.</b>", parse_mode="HTML"); return
-        if key in disabled_models:
+        if key in disabled_models and key != "auto":
             await message.answer("🚫 <b>Модель недоступна.</b>", parse_mode="HTML"); return
         user_settings[uid] = key
         user_memory[uid] = deque(maxlen=20)
         asyncio.create_task(db_save_user(uid, name, uname))
         m = MODELS[key]
-        vis = m.get("vision", False)
-        vision_hint = "\n📸 <i>Поддерживает фото — отправь прямо в чат!</i>" if vis else ""
+        if key == "auto":
+            label    = "⚡ Авто"
+            vis_hint = "\n🤖 <i>Модель выбирается автоматически под каждый запрос!</i>"
+        else:
+            vis      = m.get("vision", False)
+            label    = m["label"]
+            vis_hint = "\n📸 <i>Поддерживает фото — отправь прямо в чат!</i>" if vis else ""
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🤖 Сменить модель", callback_data="menu_ai")],
             [InlineKeyboardButton(text="🧹 Очистить память", callback_data="clear_memory"),
@@ -4328,7 +4368,7 @@ async def handle_web_app_data(message: Message):
         ])
         await message.answer(
             f"✅ <b>Модель выбрана!</b>\n\n"
-            f"🤖 {m['label']}{vision_hint}\n\n"
+            f"🤖 {label}{vis_hint}\n\n"
             f"✏️ <b>Пиши вопрос прямо сейчас</b> — отвечу здесь!",
             parse_mode="HTML", reply_markup=kb
         )
@@ -4343,7 +4383,9 @@ async def handle_web_app_data(message: Message):
 
         if key in MODELS and key not in disabled_models:
             user_settings[uid] = key
-        mk = get_model_key(uid)
+        # Резолвим "auto" в реальную модель для запроса
+        mk_raw = get_model_key(uid)
+        mk = resolve_model_key(uid, text=text, has_image=bool(images))
 
         if not text and not images:
             await message.answer("❌ Пустое сообщение."); return
@@ -11296,7 +11338,7 @@ async def rb_napisat(message: Message):
     if cur_mk.startswith("imggen:"):
         fallback = get_chat_model(uid)
         if fallback.startswith("imggen:") or fallback not in MODELS:
-            fallback = "claude_haiku"
+            fallback = "auto"
         set_chat_model(uid, fallback)
         user_settings[uid] = fallback
         model_label = MODELS.get(fallback, {}).get("label", fallback)
@@ -11785,7 +11827,7 @@ async def menu_chat(callback: CallbackQuery):
     if mk.startswith("imggen:"):
         fallback = get_chat_model(uid)
         if fallback.startswith("imggen:") or fallback not in MODELS:
-            fallback = "claude_haiku"
+            fallback = "auto"
         set_chat_model(uid, fallback)
         user_settings[uid] = fallback
         mk = fallback
@@ -13337,7 +13379,7 @@ async def set_model(callback: CallbackQuery):
     if key not in MODELS:
         return await callback.answer("❌ Модель не найдена", show_alert=True)
     # Проверяем что модель не отключена
-    if key in disabled_models:
+    if key in disabled_models and key != "auto":
         return await callback.answer("🚫 Модель временно недоступна", show_alert=True)
     if key in PREMIUM_MODELS and not has_active_sub(uid):
         await callback.answer("🔒 Нужна подписка!", show_alert=True)
@@ -13360,8 +13402,13 @@ async def set_model(callback: CallbackQuery):
     user_memory[uid] = deque(maxlen=20)
     asyncio.create_task(db_save_user(uid))
     m   = MODELS[key]
-    vis = m.get("vision", False)
-    vision_hint = "\n📸 <i>Можешь отправить фото для анализа!</i>" if vis else ""
+    if key == "auto":
+        label = "⚡ Авто"
+        hint  = "\n🤖 <i>Модель выбирается автоматически под каждый запрос!</i>"
+    else:
+        label = m["label"]
+        vis   = m.get("vision", False)
+        hint  = "\n📸 <i>Можешь отправить фото для анализа!</i>" if vis else ""
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🤖 Сменить модель", callback_data="menu_ai")],
         [InlineKeyboardButton(text="🧹 Очистить память", callback_data="clear_memory"),
@@ -13370,7 +13417,7 @@ async def set_model(callback: CallbackQuery):
     try:
         await callback.message.edit_text(
             f"✅ <b>Модель активирована!</b>\n\n"
-            f"🤖 {m['label']}{vision_hint}\n\n"
+            f"🤖 {label}{hint}\n\n"
             f"✏️ <b>Напиши свой вопрос прямо сейчас</b> — я отвечу!\n\n"
             f"<i>Память очищена — начинаем новый диалог.</i>",
             parse_mode="HTML",
@@ -13378,10 +13425,10 @@ async def set_model(callback: CallbackQuery):
         )
     except Exception:
         await callback.message.answer(
-            f"✅ <b>{m['label']} активирована!</b>{vision_hint}\n\n✏️ Пиши вопрос:",
+            f"✅ <b>{label} активирована!</b>{hint}\n\n✏️ Пиши вопрос:",
             parse_mode="HTML", reply_markup=kb
         )
-    await callback.answer(f"✅ {m['label']} активирована!")
+    await callback.answer(f"✅ {label} активирована!")
 
 
 @dp.callback_query(F.data.startswith("imgset_"))
@@ -13826,7 +13873,12 @@ async def handle_text(message: Message):
             await message.answer(f"❌ <b>Ошибка:</b> {str(ex)[:200]}", parse_mode="HTML")
         return
 
-    mk  = get_chat_model(uid)
+    mk_raw = get_chat_model(uid)
+    # Если выбрано "auto" — умный выбор модели на основе запроса
+    if mk_raw == "auto":
+        mk, _ = auto_select_model(text=message.text or "")
+    else:
+        mk = mk_raw
 
     # Обработка ожидающих действий от админа
     if uid in admin_await:
@@ -14895,11 +14947,16 @@ async def handle_text(message: Message):
 
 
     _auto_label = ""
-    if _feats.get("auto_model", False):
+    if _feats.get("auto_model", False) and mk_raw != "auto":
         _new_mk, _reason = auto_select_model(text=message.text)
         if _new_mk != mk and _new_mk in MODELS:
             mk = _new_mk
             _auto_label = f"\n🤖 <i>AI выбрал: {MODELS[mk]['label']}</i>\n({_reason})"
+    elif mk_raw == "auto":
+        _resolved_mk, _reason = auto_select_model(text=message.text)
+        if _resolved_mk != mk:
+            mk = _resolved_mk
+        _auto_label = f"\n⚡ <i>Авто: {MODELS.get(mk, {}).get('label', mk)}</i>"
 
     GLOBAL_SYS = (
         f"Ты — {BOT_NAME}, интеллектуальный ИИ-ассистент нового поколения. "
@@ -17257,6 +17314,7 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             "level_max":      50,
             "reset_in":       li.get("reset_in", ""),
             "model":          MODELS.get(get_model_key(uid), {}).get("label", ""),
+            "model_key":      get_model_key(uid),
             "mode":           user_features.get(uid, {}).get("answer_mode", "fast"),
         }, ensure_ascii=False),
         headers=headers
