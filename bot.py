@@ -3998,65 +3998,24 @@ _MODEL_WEB_KEYS = {"sonar", "sonar_pro", "sonar_reasoning_pro", "sonar_deep_rese
 # Sonar (базовый) доступен без подписки — остальные Sonar — платные
 _WEB_FREE_KEY = "sonar"
 
+# ══════════════════════════════════════════════════════════════════════
+# 🎨 ПРЯМЫЕ API-ВЫЗОВЫ ДЛЯ ЦВЕТНЫХ КНОПОК (style: "success" / "danger")
+# aiogram не поддерживает поле "style" — используем raw HTTP к Telegram API
+# ══════════════════════════════════════════════════════════════════════
 
-def ai_menu_kb(uid: int = 0) -> InlineKeyboardMarkup:
-    """Главное меню выбора модели: 4 категории-кнопки (Авто / Бесплатные / Платные / Веб-поиск)."""
-    cur_mk  = get_model_key(uid)
-    has_sub = has_active_sub(uid)
-
-    # Определяем, в какой категории находится текущая модель
-    def _cur_cat() -> str:
-        if cur_mk == "auto":
-            return "auto"
-        if cur_mk in _MODEL_WEB_KEYS:
-            return "web"
-        m = MODELS.get(cur_mk, {})
-        return "paid" if m.get("premium") else "free"
-
-    cur_cat = _cur_cat()
-
-    # Зелёные индикаторы для главных кнопок
-    def _ind(cat: str) -> str:
-        """🟢 если категория активна или доступна, иначе 🔒."""
-        is_active = (cur_cat == cat)
-        if cat == "auto":
-            return "🟢" if (has_sub or True) else "🔒"  # авто доступен всегда
-        if cat == "free":
-            return "🟢"  # бесплатные доступны всегда
-        if cat in ("paid", "web"):
-            return "🟢" if has_sub else "🔒"
-        return ""
-
-    auto_ind  = "🟢" if cur_cat == "auto"  else ("🟢" if has_sub else "")
-    free_ind  = "🟢" if cur_cat == "free"  else "🟢"
-    paid_ind  = "🟢" if cur_cat == "paid"  else ("🟢" if has_sub else "🔒")
-    web_ind   = "🟢" if cur_cat == "web"   else ("🟢" if has_sub else "🔒")
-
-    rows = [
-        # Авто — по центру сверху на всю ширину
-        [InlineKeyboardButton(text=f"{auto_ind} ⚡ Авто", callback_data="modelcat_auto")],
-        # Три категории в один ряд
-        [
-            InlineKeyboardButton(text=f"{free_ind} 🆓 Бесплатные",  callback_data="modelcat_free"),
-            InlineKeyboardButton(text=f"{paid_ind} 🔥 Платные",     callback_data="modelcat_paid"),
-            InlineKeyboardButton(text=f"{web_ind} 🌐 Веб-поиск",   callback_data="modelcat_web"),
-        ],
-        # Навигация
-        [InlineKeyboardButton(text="🎨 Генерация картинок", callback_data="menu_imggen")],
-        [InlineKeyboardButton(text="🏠 Главная", callback_data="menu_home")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def _get_model_label(uid: int) -> str:
+    """Читаемое название текущей модели пользователя."""
+    mk = get_model_key(uid)
+    if mk == "auto":
+        return "⚡ Авто"
+    if mk.startswith("imggen:"):
+        return "🎨 " + IMG_MODELS.get(mk.split(":")[1], {}).get("label", mk)
+    return MODELS.get(mk, {}).get("label", mk)
 
 
 def _model_sub_menu_text(uid: int) -> str:
-    """Текст над кнопками меню выбора модели с названием текущей."""
-    mk = get_model_key(uid)
-    if mk == "auto":
-        cur_label = "⚡ Авто"
-    elif mk.startswith("imggen:"):
-        cur_label = "🎨 " + IMG_MODELS.get(mk.split(":")[1], {}).get("label", mk)
-    else:
-        cur_label = MODELS.get(mk, {}).get("label", mk)
+    """Текст над кнопками меню выбора модели."""
+    cur_label = _get_model_label(uid)
     return (
         "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
         "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
@@ -4069,9 +4028,56 @@ def _model_sub_menu_text(uid: int) -> str:
     )
 
 
-def _modelcat_free_kb(uid: int) -> InlineKeyboardMarkup:
-    """Подменю: бесплатные модели."""
+def _ai_menu_json(uid: int) -> dict:
+    """
+    Главное меню (4 кнопки): возвращает raw JSON для Telegram API.
+    Доступные кнопки горят зелёным (style='success'), закрытые — без стиля.
+    """
     cur_mk  = get_model_key(uid)
+    has_sub = has_active_sub(uid)
+
+    def _cur_cat() -> str:
+        if cur_mk == "auto": return "auto"
+        if cur_mk in _MODEL_WEB_KEYS: return "web"
+        return "paid" if MODELS.get(cur_mk, {}).get("premium") else "free"
+
+    cur_cat = _cur_cat()
+
+    def _btn(text: str, cb: str, style: str | None = None) -> dict:
+        b: dict = {"text": text, "callback_data": cb}
+        if style:
+            b["style"] = style
+        return b
+
+    # Авто — всегда доступен, зелёный если активен или доступен
+    auto_style  = "success"
+    free_style  = "success"                        # всегда доступны
+    paid_style  = "success" if has_sub else None   # только с подпиской
+    web_style   = "success" if has_sub else None   # только с подпиской
+
+    # Если текущая категория активна — всё равно зелёный
+    auto_text = ("✅ " if cur_cat == "auto" else "") + "⚡ Авто"
+    free_text = ("✅ " if cur_cat == "free" else "") + "🆓 Бесплатные"
+    paid_text = ("✅ " if cur_cat == "paid" else "🔒 " if not has_sub else "") + "🔥 Платные"
+    web_text  = ("✅ " if cur_cat == "web"  else "🔒 " if not has_sub else "") + "🌐 Веб-поиск"
+
+    return {
+        "inline_keyboard": [
+            [_btn(auto_text, "modelcat_auto", auto_style)],
+            [
+                _btn(free_text, "modelcat_free", free_style),
+                _btn(paid_text, "modelcat_paid", paid_style),
+                _btn(web_text,  "modelcat_web",  web_style),
+            ],
+            [{"text": "🎨 Генерация картинок", "callback_data": "menu_imggen"}],
+            [{"text": "🏠 Главная",            "callback_data": "menu_home"}],
+        ]
+    }
+
+
+def _modelcat_free_json(uid: int) -> dict:
+    """Подменю бесплатных моделей — raw JSON с зелёными кнопками для активной."""
+    cur_mk = get_model_key(uid)
     free_keys = [
         k for k, v in MODELS.items()
         if k != "auto" and not v.get("premium") and k not in disabled_models and k not in _MODEL_WEB_KEYS
@@ -4082,15 +4088,21 @@ def _modelcat_free_kb(uid: int) -> InlineKeyboardMarkup:
         row = []
         for k in pair:
             m = MODELS[k]
-            ind = "🟢 " if k == cur_mk else ""
-            row.append(InlineKeyboardButton(text=ind + m["label"], callback_data=f"set_{k}"))
+            is_active = (k == cur_mk)
+            btn: dict = {
+                "text": ("✅ " if is_active else "") + m["label"],
+                "callback_data": f"set_{k}",
+            }
+            if is_active:
+                btn["style"] = "success"
+            row.append(btn)
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    rows.append([{"text": "◀️ Назад", "callback_data": "back_main"}])
+    return {"inline_keyboard": rows}
 
 
-def _modelcat_paid_kb(uid: int) -> InlineKeyboardMarkup:
-    """Подменю: платные модели."""
+def _modelcat_paid_json(uid: int) -> dict:
+    """Подменю платных моделей — raw JSON."""
     cur_mk  = get_model_key(uid)
     has_sub = has_active_sub(uid)
     paid_keys = [
@@ -4105,19 +4117,19 @@ def _modelcat_paid_kb(uid: int) -> InlineKeyboardMarkup:
             m = MODELS[k]
             is_active = (k == cur_mk)
             if is_active:
-                lbl = "🟢 " + m["label"]
+                btn: dict = {"text": "✅ " + m["label"], "callback_data": f"set_{k}", "style": "success"}
             elif has_sub:
-                lbl = m["label"]
+                btn = {"text": m["label"], "callback_data": f"set_{k}"}
             else:
-                lbl = "🔒 " + m["label"]
-            row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
+                btn = {"text": "🔒 " + m["label"], "callback_data": f"set_{k}"}
+            row.append(btn)
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    rows.append([{"text": "◀️ Назад", "callback_data": "back_main"}])
+    return {"inline_keyboard": rows}
 
 
-def _modelcat_web_kb(uid: int) -> InlineKeyboardMarkup:
-    """Подменю: веб-поиск (Sonar). Sonar базовый — бесплатно, остальные — по подписке."""
+def _modelcat_web_json(uid: int) -> dict:
+    """Подменю веб-поиска — raw JSON."""
     cur_mk  = get_model_key(uid)
     has_sub = has_active_sub(uid)
     web_keys = [k for k in _MODEL_WEB_KEYS if k in MODELS and k not in disabled_models]
@@ -4127,11 +4139,159 @@ def _modelcat_web_kb(uid: int) -> InlineKeyboardMarkup:
         is_active   = (k == cur_mk)
         is_free_web = (k == _WEB_FREE_KEY)
         if is_active:
-            lbl = "🟢 " + m["label"]
+            btn: dict = {"text": "✅ " + m["label"], "callback_data": f"set_{k}", "style": "success"}
         elif is_free_web or has_sub:
-            lbl = m["label"]
+            btn = {"text": m["label"], "callback_data": f"set_{k}"}
         else:
-            lbl = "🔒 " + m["label"]
+            btn = {"text": "🔒 " + m["label"], "callback_data": f"set_{k}"}
+        rows.append([btn])
+    rows.append([{"text": "◀️ Назад", "callback_data": "back_main"}])
+    return {"inline_keyboard": rows}
+
+
+async def _tg_send_model_menu(chat_id: int, uid: int) -> None:
+    """Отправить главное меню выбора модели напрямую через Telegram API (с цветными кнопками)."""
+    label = _get_model_label(uid)
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    kb = _ai_menu_json(uid)
+    # input_field_placeholder — показывает название модели в поле ввода
+    kb["input_field_placeholder"] = f"🤖 {label}"
+    payload = {
+        "chat_id": chat_id,
+        "text": _model_sub_menu_text(uid),
+        "parse_mode": "HTML",
+        "reply_markup": kb,
+    }
+    async with aiohttp.ClientSession() as s:
+        await s.post(url, json=payload)
+
+
+async def _tg_edit_model_menu(chat_id: int, message_id: int, uid: int,
+                               text: str | None = None,
+                               reply_markup: dict | None = None) -> bool:
+    """
+    Редактировать сообщение напрямую через Telegram API.
+    Возвращает True если успешно, False при ошибке.
+    """
+    label = _get_model_label(uid)
+    kb = reply_markup or _ai_menu_json(uid)
+    # Добавляем placeholder с моделью
+    kb["input_field_placeholder"] = f"🤖 {label}"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageText"
+    payload = {
+        "chat_id":    chat_id,
+        "message_id": message_id,
+        "text":       text or _model_sub_menu_text(uid),
+        "parse_mode": "HTML",
+        "reply_markup": kb,
+    }
+    try:
+        async with aiohttp.ClientSession() as s:
+            resp = await s.post(url, json=payload)
+            data = await resp.json()
+            return data.get("ok", False)
+    except Exception as e:
+        logging.warning(f"[tg_edit_model_menu] {e}")
+        return False
+
+
+async def _tg_send_raw(chat_id: int, text: str, reply_markup: dict,
+                        parse_mode: str = "HTML", uid: int = 0) -> None:
+    """Отправить сообщение с произвольной raw-клавиатурой + placeholder модели."""
+    if uid:
+        reply_markup["input_field_placeholder"] = f"🤖 {_get_model_label(uid)}"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": parse_mode,
+        "reply_markup": reply_markup,
+    }
+    async with aiohttp.ClientSession() as s:
+        await s.post(url, json=payload)
+
+
+# Заглушки aiogram-совместимых объектов (используются в местах где нужен InlineKeyboardMarkup)
+# Реальные меню моделей теперь отправляются через _tg_* функции напрямую.
+
+def ai_menu_kb(uid: int = 0) -> InlineKeyboardMarkup:
+    """Fallback aiogram-клавиатура (без style). Используй _tg_send_model_menu для цветных кнопок."""
+    cur_mk  = get_model_key(uid)
+    has_sub = has_active_sub(uid)
+    def _cur_cat():
+        if cur_mk == "auto": return "auto"
+        if cur_mk in _MODEL_WEB_KEYS: return "web"
+        return "paid" if MODELS.get(cur_mk, {}).get("premium") else "free"
+    cur_cat = _cur_cat()
+    auto_text = ("✅ " if cur_cat == "auto" else "") + "⚡ Авто"
+    free_text = ("✅ " if cur_cat == "free" else "") + "🆓 Бесплатные"
+    paid_text = ("✅ " if cur_cat == "paid" else "🔒 " if not has_sub else "") + "🔥 Платные"
+    web_text  = ("✅ " if cur_cat == "web"  else "🔒 " if not has_sub else "") + "🌐 Веб-поиск"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=auto_text, callback_data="modelcat_auto")],
+        [
+            InlineKeyboardButton(text=free_text, callback_data="modelcat_free"),
+            InlineKeyboardButton(text=paid_text, callback_data="modelcat_paid"),
+            InlineKeyboardButton(text=web_text,  callback_data="modelcat_web"),
+        ],
+        [InlineKeyboardButton(text="🎨 Генерация картинок", callback_data="menu_imggen")],
+        [InlineKeyboardButton(text="🏠 Главная", callback_data="menu_home")],
+    ])
+
+
+def _modelcat_free_kb(uid: int) -> InlineKeyboardMarkup:
+    """Fallback aiogram-клавиатура для бесплатных моделей."""
+    cur_mk = get_model_key(uid)
+    free_keys = [
+        k for k, v in MODELS.items()
+        if k != "auto" and not v.get("premium") and k not in disabled_models and k not in _MODEL_WEB_KEYS
+    ]
+    rows = []
+    for i in range(0, len(free_keys), 2):
+        pair = free_keys[i:i+2]
+        row = [InlineKeyboardButton(
+            text=("✅ " if k == cur_mk else "") + MODELS[k]["label"],
+            callback_data=f"set_{k}"
+        ) for k in pair]
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _modelcat_paid_kb(uid: int) -> InlineKeyboardMarkup:
+    """Fallback aiogram-клавиатура для платных моделей."""
+    cur_mk  = get_model_key(uid)
+    has_sub = has_active_sub(uid)
+    paid_keys = [
+        k for k, v in MODELS.items()
+        if k != "auto" and v.get("premium") and k not in disabled_models and k not in _MODEL_WEB_KEYS
+    ]
+    rows = []
+    for i in range(0, len(paid_keys), 2):
+        pair = paid_keys[i:i+2]
+        row = []
+        for k in pair:
+            m = MODELS[k]
+            if k == cur_mk: lbl = "✅ " + m["label"]
+            elif has_sub:   lbl = m["label"]
+            else:           lbl = "🔒 " + m["label"]
+            row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _modelcat_web_kb(uid: int) -> InlineKeyboardMarkup:
+    """Fallback aiogram-клавиатура для веб-поиска."""
+    cur_mk  = get_model_key(uid)
+    has_sub = has_active_sub(uid)
+    web_keys = [k for k in _MODEL_WEB_KEYS if k in MODELS and k not in disabled_models]
+    rows = []
+    for k in web_keys:
+        m = MODELS[k]
+        if k == cur_mk:          lbl = "✅ " + m["label"]
+        elif k == _WEB_FREE_KEY or has_sub: lbl = m["label"]
+        else:                    lbl = "🔒 " + m["label"]
         rows.append([InlineKeyboardButton(text=lbl, callback_data=f"set_{k}")])
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -4406,10 +4566,7 @@ async def cmd_music(message: Message):
 async def cmd_model(message: Message):
     uid = message.from_user.id
     if not await require_subscription(message): return
-    await message.answer(
-        premium_html(_model_sub_menu_text(uid)),
-        parse_mode="HTML", reply_markup=ai_menu_kb(uid)
-    )
+    await _tg_send_model_menu(message.chat.id, uid)
 
 
 # ==================================================================
@@ -11893,11 +12050,11 @@ async def menu_ai(callback: CallbackQuery):
     uid = callback.from_user.id
     if not await require_subscription(callback):
         return
-    text = premium_html(_model_sub_menu_text(uid))
-    try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=ai_menu_kb(uid))
-    except Exception:
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=ai_menu_kb(uid))
+    ok = await _tg_edit_model_menu(
+        callback.message.chat.id, callback.message.message_id, uid
+    )
+    if not ok:
+        await _tg_send_model_menu(callback.message.chat.id, uid)
     await callback.answer()
 
 
@@ -13420,10 +13577,11 @@ async def back_home(callback: CallbackQuery):
 @dp.callback_query(F.data == "back_ai")
 async def back_ai(callback: CallbackQuery):
     uid = callback.from_user.id
-    await callback.message.edit_text(
-        premium_html(_model_sub_menu_text(uid)),
-        parse_mode="HTML", reply_markup=ai_menu_kb(uid),
+    ok = await _tg_edit_model_menu(
+        callback.message.chat.id, callback.message.message_id, uid
     )
+    if not ok:
+        await _tg_send_model_menu(callback.message.chat.id, uid)
     await callback.answer()
 
 
@@ -13436,13 +13594,11 @@ async def modelcat_auto_cb(callback: CallbackQuery):
     set_chat_model(uid, "auto")
     user_memory[uid] = deque(maxlen=20)
     asyncio.create_task(db_save_user(uid))
-    try:
-        await callback.message.edit_text(
-            premium_html(_model_sub_menu_text(uid)),
-            parse_mode="HTML", reply_markup=ai_menu_kb(uid),
-        )
-    except Exception:
-        pass
+    ok = await _tg_edit_model_menu(
+        callback.message.chat.id, callback.message.message_id, uid
+    )
+    if not ok:
+        await _tg_send_model_menu(callback.message.chat.id, uid)
     await callback.answer("✅ Модель: ⚡ Авто")
 
 
@@ -13450,18 +13606,19 @@ async def modelcat_auto_cb(callback: CallbackQuery):
 async def modelcat_free_cb(callback: CallbackQuery):
     """Подменю бесплатных моделей."""
     uid = callback.from_user.id
-    mk = get_model_key(uid)
-    cur_label = MODELS.get(mk, {}).get("label", mk) if mk != "auto" else "⚡ Авто"
-    try:
-        await callback.message.edit_text(
-            f"🆓 <b>Бесплатные модели</b>\n\n"
-            f"✅ Выбрана модель: <code>{cur_label}</code>\n"
-            f"◈ 🟢 — активная модель\n"
-            f"◈ 📸 — поддерживает анализ фото",
-            parse_mode="HTML", reply_markup=_modelcat_free_kb(uid),
-        )
-    except Exception:
-        pass
+    label = _get_model_label(uid)
+    text = (
+        f"🆓 <b>Бесплатные модели</b>\n\n"
+        f"✅ Выбрана модель: <code>{label}</code>\n"
+        f"◈ ✅ — активная модель\n"
+        f"◈ 📸 — поддерживает анализ фото"
+    )
+    ok = await _tg_edit_model_menu(
+        callback.message.chat.id, callback.message.message_id, uid,
+        text=text, reply_markup=_modelcat_free_json(uid)
+    )
+    if not ok:
+        await _tg_send_raw(callback.message.chat.id, text, _modelcat_free_json(uid), uid=uid)
     await callback.answer()
 
 
@@ -13470,19 +13627,20 @@ async def modelcat_paid_cb(callback: CallbackQuery):
     """Подменю платных моделей."""
     uid = callback.from_user.id
     has_sub = has_active_sub(uid)
-    mk = get_model_key(uid)
-    cur_label = MODELS.get(mk, {}).get("label", mk) if mk != "auto" else "⚡ Авто"
+    label = _get_model_label(uid)
     lock_note = "" if has_sub else "\n🔒 — доступно только по подписке"
-    try:
-        await callback.message.edit_text(
-            f"🔥 <b>Платные модели</b>{lock_note}\n\n"
-            f"✅ Выбрана модель: <code>{cur_label}</code>\n"
-            f"◈ 🟢 — активная модель\n"
-            f"◈ 📸 — поддерживает анализ фото",
-            parse_mode="HTML", reply_markup=_modelcat_paid_kb(uid),
-        )
-    except Exception:
-        pass
+    text = (
+        f"🔥 <b>Платные модели</b>{lock_note}\n\n"
+        f"✅ Выбрана модель: <code>{label}</code>\n"
+        f"◈ ✅ — активная модель\n"
+        f"◈ 📸 — поддерживает анализ фото"
+    )
+    ok = await _tg_edit_model_menu(
+        callback.message.chat.id, callback.message.message_id, uid,
+        text=text, reply_markup=_modelcat_paid_json(uid)
+    )
+    if not ok:
+        await _tg_send_raw(callback.message.chat.id, text, _modelcat_paid_json(uid), uid=uid)
     await callback.answer()
 
 
@@ -13491,19 +13649,20 @@ async def modelcat_web_cb(callback: CallbackQuery):
     """Подменю веб-поиска."""
     uid = callback.from_user.id
     has_sub = has_active_sub(uid)
-    mk = get_model_key(uid)
-    cur_label = MODELS.get(mk, {}).get("label", mk) if mk != "auto" else "⚡ Авто"
+    label = _get_model_label(uid)
     lock_note = "" if has_sub else "\n🔒 — все модели кроме Sonar Web только по подписке"
-    try:
-        await callback.message.edit_text(
-            f"🌐 <b>Веб-поиск (Sonar)</b>{lock_note}\n\n"
-            f"✅ Выбрана модель: <code>{cur_label}</code>\n"
-            f"◈ 🟢 — активная модель\n"
-            f"◈ Модели ищут актуальную информацию в интернете",
-            parse_mode="HTML", reply_markup=_modelcat_web_kb(uid),
-        )
-    except Exception:
-        pass
+    text = (
+        f"🌐 <b>Веб-поиск (Sonar)</b>{lock_note}\n\n"
+        f"✅ Выбрана модель: <code>{label}</code>\n"
+        f"◈ ✅ — активная модель\n"
+        f"◈ Модели ищут актуальную информацию в интернете"
+    )
+    ok = await _tg_edit_model_menu(
+        callback.message.chat.id, callback.message.message_id, uid,
+        text=text, reply_markup=_modelcat_web_json(uid)
+    )
+    if not ok:
+        await _tg_send_raw(callback.message.chat.id, text, _modelcat_web_json(uid), uid=uid)
     await callback.answer()
 
 
@@ -13528,10 +13687,11 @@ async def open_category(callback: CallbackQuery):
 @dp.callback_query(F.data == "back_main")
 async def back_main(callback: CallbackQuery):
     uid = callback.from_user.id
-    await callback.message.edit_text(
-        premium_html(_model_sub_menu_text(uid)),
-        parse_mode="HTML", reply_markup=ai_menu_kb(uid),
+    ok = await _tg_edit_model_menu(
+        callback.message.chat.id, callback.message.message_id, uid
     )
+    if not ok:
+        await _tg_send_model_menu(callback.message.chat.id, uid)
     await callback.answer()
 
 
@@ -13594,38 +13754,26 @@ async def set_model(callback: CallbackQuery):
     m = MODELS[key]
     label = "⚡ Авто" if key == "auto" else m["label"]
 
-    # После выбора возвращаемся в нужное подменю (по категории выбранной модели)
-    def _back_cat_kb() -> InlineKeyboardMarkup:
-        if key in _MODEL_WEB_KEYS:
-            return _modelcat_web_kb(uid)
-        if m.get("premium"):
-            return _modelcat_paid_kb(uid)
-        if key == "auto":
-            return ai_menu_kb(uid)
-        return _modelcat_free_kb(uid)
+    # После выбора возвращаемся в нужное подменю с цветными кнопками
+    if key in _MODEL_WEB_KEYS:
+        sub_text = f"🌐 <b>Веб-поиск (Sonar)</b>\n\n✅ Выбрана модель: <code>{label}</code>"
+        sub_kb   = _modelcat_web_json(uid)
+    elif m.get("premium"):
+        sub_text = f"🔥 <b>Платные модели</b>\n\n✅ Выбрана модель: <code>{label}</code>"
+        sub_kb   = _modelcat_paid_json(uid)
+    elif key == "auto":
+        sub_text = _model_sub_menu_text(uid)
+        sub_kb   = _ai_menu_json(uid)
+    else:
+        sub_text = f"🆓 <b>Бесплатные модели</b>\n\n✅ Выбрана модель: <code>{label}</code>"
+        sub_kb   = _modelcat_free_json(uid)
 
-    def _back_cat_text() -> str:
-        if key in _MODEL_WEB_KEYS:
-            return f"🌐 <b>Веб-поиск (Sonar)</b>\n\n✅ Выбрана модель: <code>{label}</code>"
-        if m.get("premium"):
-            return f"🔥 <b>Платные модели</b>\n\n✅ Выбрана модель: <code>{label}</code>"
-        if key == "auto":
-            return premium_html(_model_sub_menu_text(uid))
-        return f"🆓 <b>Бесплатные модели</b>\n\n✅ Выбрана модель: <code>{label}</code>"
-
-    try:
-        await callback.message.edit_text(
-            _back_cat_text(), parse_mode="HTML", reply_markup=_back_cat_kb()
-        )
-    except Exception:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🤖 Выбрать модель", callback_data="menu_ai")],
-            [InlineKeyboardButton(text="🏠 Главная", callback_data="back_home")],
-        ])
-        await callback.message.answer(
-            f"✅ <b>Модель изменена на {label}</b>\n\n✏️ Пиши вопрос:",
-            parse_mode="HTML", reply_markup=kb
-        )
+    ok = await _tg_edit_model_menu(
+        callback.message.chat.id, callback.message.message_id, uid,
+        text=sub_text, reply_markup=sub_kb
+    )
+    if not ok:
+        await _tg_send_raw(callback.message.chat.id, sub_text, sub_kb, uid=uid)
     await callback.answer(f"✅ Модель: {label}")
 
 
