@@ -3995,54 +3995,76 @@ def home_kb(uid: int) -> InlineKeyboardMarkup:
 
 
 def ai_menu_kb(uid: int = 0) -> InlineKeyboardMarkup:
-    """Единое меню выбора модели: Авто / Бесплатные / Платные — как в Mini App."""
+    """Единое меню выбора модели: Авто / Бесплатные / Платные / Веб-поиск — как в Mini App."""
     cur_mk = get_model_key(uid)
     has_sub = has_active_sub(uid)
     rows = []
 
-    # ── Группа 1: Авто ────────────────────────────────────────────
+    # ── Группа 1: Авто (полная ширина) ────────────────────────────
     auto_active = (cur_mk == "auto")
-    auto_text = "✅ ⚡ Авто" if auto_active else "⚡ Авто"
+    auto_text = "✓ ⚡ Авто" if auto_active else "⚡ Авто"
     rows.append([InlineKeyboardButton(text=auto_text, callback_data="set_auto")])
 
     # ── Группа 2: Бесплатные ──────────────────────────────────────
-    rows.append([InlineKeyboardButton(text="─── 🆓 Бесплатные ───", callback_data="noop_free")])
-    free_keys = [k for k, v in MODELS.items() if k != "auto" and not v.get("premium") and k not in disabled_models]
-    # Пары по 2 в ряд
-    free_pairs = [free_keys[i:i+2] for i in range(0, len(free_keys), 2)]
-    for pair in free_pairs:
-        row = []
-        for k in pair:
-            m = MODELS[k]
-            is_active = (k == cur_mk)
-            lbl = ("✅ " if is_active else "") + m["label"]
-            row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
-        rows.append(row)
+    WEB_KEYS = {"sonar", "sonar_pro", "sonar_reasoning_pro", "sonar_deep_research"}
+    free_keys = [
+        k for k, v in MODELS.items()
+        if k != "auto" and not v.get("premium") and k not in disabled_models and k not in WEB_KEYS
+    ]
+    if free_keys:
+        rows.append([InlineKeyboardButton(text="──── 🆓 Бесплатные ────", callback_data="noop_free")])
+        for i in range(0, len(free_keys), 2):
+            pair = free_keys[i:i+2]
+            row = []
+            for k in pair:
+                m = MODELS[k]
+                is_active = (k == cur_mk)
+                lbl = ("✓ " if is_active else "") + m["label"]
+                row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
+            rows.append(row)
 
     # ── Группа 3: Платные ─────────────────────────────────────────
-    paid_keys = [k for k, v in MODELS.items() if k != "auto" and v.get("premium") and k not in disabled_models]
+    paid_keys = [
+        k for k, v in MODELS.items()
+        if k != "auto" and v.get("premium") and k not in disabled_models and k not in WEB_KEYS
+    ]
     if paid_keys:
-        rows.append([InlineKeyboardButton(text="─── 🔥 Платные ───", callback_data="noop_paid")])
-        paid_pairs = [paid_keys[i:i+2] for i in range(0, len(paid_keys), 2)]
-        for pair in paid_pairs:
+        lock_hint = "" if has_sub else " 🔒"
+        rows.append([InlineKeyboardButton(text=f"──── 🔥 Платные{lock_hint} ────", callback_data="noop_paid")])
+        for i in range(0, len(paid_keys), 2):
+            pair = paid_keys[i:i+2]
             row = []
             for k in pair:
                 m = MODELS[k]
                 is_active = (k == cur_mk)
                 if has_sub:
-                    lbl = ("✅ " if is_active else "") + m["label"]
+                    lbl = ("✓ " if is_active else "") + m["label"]
                 else:
                     lbl = "🔒 " + m["label"]
                 row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
             rows.append(row)
 
-    # ── Навигация ─────────────────────────────────────────────────
-    rows.append([
-        InlineKeyboardButton(text="🎨 Генерация картинок", callback_data="menu_imggen"),
-    ])
-    rows.append([
-        InlineKeyboardButton(text="🏠 Главная", callback_data="menu_home"),
-    ])
+    # ── Группа 4: Веб-поиск (Sonar) ───────────────────────────────
+    web_keys = [k for k in WEB_KEYS if k in MODELS and k not in disabled_models]
+    if web_keys:
+        rows.append([InlineKeyboardButton(text="──── 🌐 Веб-поиск ────", callback_data="noop_web")])
+        for i in range(0, len(web_keys), 2):
+            pair = list(web_keys)[i:i+2]
+            row = []
+            for k in pair:
+                m = MODELS[k]
+                is_active = (k == cur_mk)
+                is_premium_web = m.get("premium", False) and not has_sub
+                if is_premium_web:
+                    lbl = "🔒 " + m["label"]
+                else:
+                    lbl = ("✓ " if is_active else "") + m["label"]
+                row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
+            rows.append(row)
+
+    # ── Навигация ──────────────────────────────────────────────────
+    rows.append([InlineKeyboardButton(text="🎨 Генерация картинок", callback_data="menu_imggen")])
+    rows.append([InlineKeyboardButton(text="🏠 Главная", callback_data="menu_home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -4067,7 +4089,7 @@ def category_kb(cat_key: str, uid: int = 0) -> InlineKeyboardMarkup:
             if needs_sub:
                 btn_text = "🔒 " + m["label"]
             elif is_active:
-                btn_text = "✅ " + m["label"]
+                btn_text = "✓ " + m["label"]
             else:
                 btn_text = m["label"]
             rows.append([InlineKeyboardButton(
@@ -17116,8 +17138,8 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
             headers=headers
         )
 
-    # Установка модели
-    if model and model in MODELS and model not in disabled_models:
+    # Установка модели: принимаем 'auto' и любую существующую модель
+    if model and (model == "auto" or (model in MODELS and model not in disabled_models)):
         user_settings[uid] = model
     mk = get_model_key(uid)
 
@@ -17150,7 +17172,7 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
             headers=headers
         )
 
-    if mk in disabled_models:
+    if mk != "auto" and mk in disabled_models:
         return aiohttp_web.Response(
             text=_j.dumps({"ok": False, "error": "model_disabled"}, ensure_ascii=False),
             headers=headers
@@ -17255,10 +17277,21 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
             else:
                 user_memory[uid].append({"role": "user", "content": text})
                 query_msgs = [{"role": "system", "content": GLOBAL_SYS}] + list(user_memory[uid])
-            ans = await call_chat(query_msgs, mk)
+            # Разрешаем 'auto' в реальную модель перед вызовом API
+            actual_mk = mk
+            if mk == "auto":
+                actual_mk, _reason = auto_select_model(text=text, has_image=bool(images))
+                logging.info(f"[auto] uid={uid} → {actual_mk} ({_reason})")
+                if actual_mk not in MODELS or actual_mk in disabled_models:
+                    actual_mk = next(
+                        (k for k, v in MODELS.items()
+                         if k != "auto" and not v.get("premium") and k not in disabled_models),
+                        "dsv3"
+                    )
+            ans = await call_chat(query_msgs, actual_mk)
             user_memory[uid].append({"role": "assistant", "content": ans})
-            spend_limit(uid, mk)
-            used_model_label = MODELS[mk]["label"]
+            spend_limit(uid, actual_mk)
+            used_model_label = MODELS[actual_mk]["label"]
 
         last_responses[uid] = {"q": text or "[Фото]", "a": ans, "model_label": used_model_label, "model_key": mk}
         if uid in user_profiles:
