@@ -3994,77 +3994,146 @@ def home_kb(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=built)
 
 
+_MODEL_WEB_KEYS = {"sonar", "sonar_pro", "sonar_reasoning_pro", "sonar_deep_research"}
+# Sonar (базовый) доступен без подписки — остальные Sonar — платные
+_WEB_FREE_KEY = "sonar"
+
+
 def ai_menu_kb(uid: int = 0) -> InlineKeyboardMarkup:
-    """Единое меню выбора модели: Авто / Бесплатные / Платные / Веб-поиск — как в Mini App."""
-    cur_mk = get_model_key(uid)
+    """Главное меню выбора модели: 4 категории-кнопки (Авто / Бесплатные / Платные / Веб-поиск)."""
+    cur_mk  = get_model_key(uid)
     has_sub = has_active_sub(uid)
-    rows = []
 
-    # ── Группа 1: Авто (полная ширина) ────────────────────────────
-    auto_active = (cur_mk == "auto")
-    auto_text = "✓ ⚡ Авто" if auto_active else "⚡ Авто"
-    rows.append([InlineKeyboardButton(text=auto_text, callback_data="set_auto")])
+    # Определяем, в какой категории находится текущая модель
+    def _cur_cat() -> str:
+        if cur_mk == "auto":
+            return "auto"
+        if cur_mk in _MODEL_WEB_KEYS:
+            return "web"
+        m = MODELS.get(cur_mk, {})
+        return "paid" if m.get("premium") else "free"
 
-    # ── Группа 2: Бесплатные ──────────────────────────────────────
-    WEB_KEYS = {"sonar", "sonar_pro", "sonar_reasoning_pro", "sonar_deep_research"}
+    cur_cat = _cur_cat()
+
+    # Зелёные индикаторы для главных кнопок
+    def _ind(cat: str) -> str:
+        """🟢 если категория активна или доступна, иначе 🔒."""
+        is_active = (cur_cat == cat)
+        if cat == "auto":
+            return "🟢" if (has_sub or True) else "🔒"  # авто доступен всегда
+        if cat == "free":
+            return "🟢"  # бесплатные доступны всегда
+        if cat in ("paid", "web"):
+            return "🟢" if has_sub else "🔒"
+        return ""
+
+    auto_ind  = "🟢" if cur_cat == "auto"  else ("🟢" if has_sub else "")
+    free_ind  = "🟢" if cur_cat == "free"  else "🟢"
+    paid_ind  = "🟢" if cur_cat == "paid"  else ("🟢" if has_sub else "🔒")
+    web_ind   = "🟢" if cur_cat == "web"   else ("🟢" if has_sub else "🔒")
+
+    rows = [
+        # Авто — по центру сверху на всю ширину
+        [InlineKeyboardButton(text=f"{auto_ind} ⚡ Авто", callback_data="modelcat_auto")],
+        # Три категории в один ряд
+        [
+            InlineKeyboardButton(text=f"{free_ind} 🆓 Бесплатные",  callback_data="modelcat_free"),
+            InlineKeyboardButton(text=f"{paid_ind} 🔥 Платные",     callback_data="modelcat_paid"),
+            InlineKeyboardButton(text=f"{web_ind} 🌐 Веб-поиск",   callback_data="modelcat_web"),
+        ],
+        # Навигация
+        [InlineKeyboardButton(text="🎨 Генерация картинок", callback_data="menu_imggen")],
+        [InlineKeyboardButton(text="🏠 Главная", callback_data="menu_home")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _model_sub_menu_text(uid: int) -> str:
+    """Текст над кнопками меню выбора модели с названием текущей."""
+    mk = get_model_key(uid)
+    if mk == "auto":
+        cur_label = "⚡ Авто"
+    elif mk.startswith("imggen:"):
+        cur_label = "🎨 " + IMG_MODELS.get(mk.split(":")[1], {}).get("label", mk)
+    else:
+        cur_label = MODELS.get(mk, {}).get("label", mk)
+    return (
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+        "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
+        "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
+        f"✅ Выбрана модель: <code>{cur_label}</code>\n"
+        "◈ 🔒 — только с подпиской\n"
+        "◈ 📸 — поддерживает анализ фото\n\n"
+        "▾ Выбери категорию\n"
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
+    )
+
+
+def _modelcat_free_kb(uid: int) -> InlineKeyboardMarkup:
+    """Подменю: бесплатные модели."""
+    cur_mk  = get_model_key(uid)
     free_keys = [
         k for k, v in MODELS.items()
-        if k != "auto" and not v.get("premium") and k not in disabled_models and k not in WEB_KEYS
+        if k != "auto" and not v.get("premium") and k not in disabled_models and k not in _MODEL_WEB_KEYS
     ]
-    if free_keys:
-        rows.append([InlineKeyboardButton(text="──── 🆓 Бесплатные ────", callback_data="noop_free")])
-        for i in range(0, len(free_keys), 2):
-            pair = free_keys[i:i+2]
-            row = []
-            for k in pair:
-                m = MODELS[k]
-                is_active = (k == cur_mk)
-                lbl = ("✓ " if is_active else "") + m["label"]
-                row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
-            rows.append(row)
+    rows = []
+    for i in range(0, len(free_keys), 2):
+        pair = free_keys[i:i+2]
+        row = []
+        for k in pair:
+            m = MODELS[k]
+            ind = "🟢 " if k == cur_mk else ""
+            row.append(InlineKeyboardButton(text=ind + m["label"], callback_data=f"set_{k}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    # ── Группа 3: Платные ─────────────────────────────────────────
+
+def _modelcat_paid_kb(uid: int) -> InlineKeyboardMarkup:
+    """Подменю: платные модели."""
+    cur_mk  = get_model_key(uid)
+    has_sub = has_active_sub(uid)
     paid_keys = [
         k for k, v in MODELS.items()
-        if k != "auto" and v.get("premium") and k not in disabled_models and k not in WEB_KEYS
+        if k != "auto" and v.get("premium") and k not in disabled_models and k not in _MODEL_WEB_KEYS
     ]
-    if paid_keys:
-        lock_hint = "" if has_sub else " 🔒"
-        rows.append([InlineKeyboardButton(text=f"──── 🔥 Платные{lock_hint} ────", callback_data="noop_paid")])
-        for i in range(0, len(paid_keys), 2):
-            pair = paid_keys[i:i+2]
-            row = []
-            for k in pair:
-                m = MODELS[k]
-                is_active = (k == cur_mk)
-                if has_sub:
-                    lbl = ("✓ " if is_active else "") + m["label"]
-                else:
-                    lbl = "🔒 " + m["label"]
-                row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
-            rows.append(row)
+    rows = []
+    for i in range(0, len(paid_keys), 2):
+        pair = paid_keys[i:i+2]
+        row = []
+        for k in pair:
+            m = MODELS[k]
+            is_active = (k == cur_mk)
+            if is_active:
+                lbl = "🟢 " + m["label"]
+            elif has_sub:
+                lbl = m["label"]
+            else:
+                lbl = "🔒 " + m["label"]
+            row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    # ── Группа 4: Веб-поиск (Sonar) ───────────────────────────────
-    web_keys = [k for k in WEB_KEYS if k in MODELS and k not in disabled_models]
-    if web_keys:
-        rows.append([InlineKeyboardButton(text="──── 🌐 Веб-поиск ────", callback_data="noop_web")])
-        for i in range(0, len(web_keys), 2):
-            pair = list(web_keys)[i:i+2]
-            row = []
-            for k in pair:
-                m = MODELS[k]
-                is_active = (k == cur_mk)
-                is_premium_web = m.get("premium", False) and not has_sub
-                if is_premium_web:
-                    lbl = "🔒 " + m["label"]
-                else:
-                    lbl = ("✓ " if is_active else "") + m["label"]
-                row.append(InlineKeyboardButton(text=lbl, callback_data=f"set_{k}"))
-            rows.append(row)
 
-    # ── Навигация ──────────────────────────────────────────────────
-    rows.append([InlineKeyboardButton(text="🎨 Генерация картинок", callback_data="menu_imggen")])
-    rows.append([InlineKeyboardButton(text="🏠 Главная", callback_data="menu_home")])
+def _modelcat_web_kb(uid: int) -> InlineKeyboardMarkup:
+    """Подменю: веб-поиск (Sonar). Sonar базовый — бесплатно, остальные — по подписке."""
+    cur_mk  = get_model_key(uid)
+    has_sub = has_active_sub(uid)
+    web_keys = [k for k in _MODEL_WEB_KEYS if k in MODELS and k not in disabled_models]
+    rows = []
+    for k in web_keys:
+        m = MODELS[k]
+        is_active   = (k == cur_mk)
+        is_free_web = (k == _WEB_FREE_KEY)
+        if is_active:
+            lbl = "🟢 " + m["label"]
+        elif is_free_web or has_sub:
+            lbl = m["label"]
+        else:
+            lbl = "🔒 " + m["label"]
+        rows.append([InlineKeyboardButton(text=lbl, callback_data=f"set_{k}")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -4337,24 +4406,8 @@ async def cmd_music(message: Message):
 async def cmd_model(message: Message):
     uid = message.from_user.id
     if not await require_subscription(message): return
-    mk = get_model_key(uid)
-    if mk == "auto":
-        cur = "⚡ Авто"
-    elif mk.startswith("imggen:"):
-        cur = "🎨 " + IMG_MODELS[mk.split(":")[1]]["label"]
-    else:
-        cur = MODELS.get(mk, {}).get("label", mk)
     await message.answer(
-        premium_html(
-            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-            "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
-            "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
-            f"◈ Активная — <code>{cur}</code>\n"
-            "◈ 🔒 — только с подпиской\n"
-            "◈ 📸 — поддерживает анализ фото\n\n"
-            "▾ Выбери модель\n"
-            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-        ),
+        premium_html(_model_sub_menu_text(uid)),
         parse_mode="HTML", reply_markup=ai_menu_kb(uid)
     )
 
@@ -11840,23 +11893,7 @@ async def menu_ai(callback: CallbackQuery):
     uid = callback.from_user.id
     if not await require_subscription(callback):
         return
-    mk  = get_model_key(uid)
-    if mk == "auto":
-        cur = "⚡ Авто"
-    elif mk.startswith("imggen:"):
-        cur = "🎨 " + IMG_MODELS.get(mk.split(":")[1], {}).get("label", mk)
-    else:
-        cur = MODELS.get(mk, {}).get("label", mk)
-    text = premium_html(
-        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-        "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
-        "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
-        f"◈ Активная — <code>{cur}</code>\n"
-        "◈ 🔒 — только с подпиской\n"
-        "◈ 📸 — поддерживает анализ фото\n\n"
-        "▾ Выбери модель\n"
-        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-    )
+    text = premium_html(_model_sub_menu_text(uid))
     try:
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=ai_menu_kb(uid))
     except Exception:
@@ -13383,27 +13420,93 @@ async def back_home(callback: CallbackQuery):
 @dp.callback_query(F.data == "back_ai")
 async def back_ai(callback: CallbackQuery):
     uid = callback.from_user.id
-    mk  = get_model_key(uid)
-    if mk == "auto":
-        cur = "⚡ Авто"
-    elif mk.startswith("imggen:"):
-        cur = "🎨 " + IMG_MODELS.get(mk.split(":")[1], {}).get("label", mk)
-    else:
-        cur = MODELS.get(mk, {}).get("label", mk)
     await callback.message.edit_text(
-        premium_html(
-            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-            "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
-            "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
-            f"◈ Активная — <code>{cur}</code>\n"
-            "◈ 🔒 — только с подпиской\n"
-            "◈ 📸 — поддерживает анализ фото\n\n"
-            "▾ Выбери модель\n"
-            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-        ),
+        premium_html(_model_sub_menu_text(uid)),
         parse_mode="HTML", reply_markup=ai_menu_kb(uid),
     )
     await callback.answer()
+
+
+# ── Обработчики подменю категорий моделей ─────────────────────────────
+
+@dp.callback_query(F.data == "modelcat_auto")
+async def modelcat_auto_cb(callback: CallbackQuery):
+    """Нажатие на кнопку «Авто» — сразу выбираем auto."""
+    uid = callback.from_user.id
+    set_chat_model(uid, "auto")
+    user_memory[uid] = deque(maxlen=20)
+    asyncio.create_task(db_save_user(uid))
+    try:
+        await callback.message.edit_text(
+            premium_html(_model_sub_menu_text(uid)),
+            parse_mode="HTML", reply_markup=ai_menu_kb(uid),
+        )
+    except Exception:
+        pass
+    await callback.answer("✅ Модель: ⚡ Авто")
+
+
+@dp.callback_query(F.data == "modelcat_free")
+async def modelcat_free_cb(callback: CallbackQuery):
+    """Подменю бесплатных моделей."""
+    uid = callback.from_user.id
+    mk = get_model_key(uid)
+    cur_label = MODELS.get(mk, {}).get("label", mk) if mk != "auto" else "⚡ Авто"
+    try:
+        await callback.message.edit_text(
+            f"🆓 <b>Бесплатные модели</b>\n\n"
+            f"✅ Выбрана модель: <code>{cur_label}</code>\n"
+            f"◈ 🟢 — активная модель\n"
+            f"◈ 📸 — поддерживает анализ фото",
+            parse_mode="HTML", reply_markup=_modelcat_free_kb(uid),
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "modelcat_paid")
+async def modelcat_paid_cb(callback: CallbackQuery):
+    """Подменю платных моделей."""
+    uid = callback.from_user.id
+    has_sub = has_active_sub(uid)
+    mk = get_model_key(uid)
+    cur_label = MODELS.get(mk, {}).get("label", mk) if mk != "auto" else "⚡ Авто"
+    lock_note = "" if has_sub else "\n🔒 — доступно только по подписке"
+    try:
+        await callback.message.edit_text(
+            f"🔥 <b>Платные модели</b>{lock_note}\n\n"
+            f"✅ Выбрана модель: <code>{cur_label}</code>\n"
+            f"◈ 🟢 — активная модель\n"
+            f"◈ 📸 — поддерживает анализ фото",
+            parse_mode="HTML", reply_markup=_modelcat_paid_kb(uid),
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "modelcat_web")
+async def modelcat_web_cb(callback: CallbackQuery):
+    """Подменю веб-поиска."""
+    uid = callback.from_user.id
+    has_sub = has_active_sub(uid)
+    mk = get_model_key(uid)
+    cur_label = MODELS.get(mk, {}).get("label", mk) if mk != "auto" else "⚡ Авто"
+    lock_note = "" if has_sub else "\n🔒 — все модели кроме Sonar Web только по подписке"
+    try:
+        await callback.message.edit_text(
+            f"🌐 <b>Веб-поиск (Sonar)</b>{lock_note}\n\n"
+            f"✅ Выбрана модель: <code>{cur_label}</code>\n"
+            f"◈ 🟢 — активная модель\n"
+            f"◈ Модели ищут актуальную информацию в интернете",
+            parse_mode="HTML", reply_markup=_modelcat_web_kb(uid),
+        )
+    except Exception:
+        pass
+    await callback.answer()
+
+
 
 
 @dp.callback_query(F.data.startswith("cat_"))
@@ -13425,24 +13528,8 @@ async def open_category(callback: CallbackQuery):
 @dp.callback_query(F.data == "back_main")
 async def back_main(callback: CallbackQuery):
     uid = callback.from_user.id
-    mk  = get_model_key(uid)
-    if mk == "auto":
-        cur = "⚡ Авто"
-    elif mk.startswith("imggen:"):
-        cur = "🎨 " + IMG_MODELS.get(mk.split(":")[1], {}).get("label", mk)
-    else:
-        cur = MODELS.get(mk, {}).get("label", mk)
     await callback.message.edit_text(
-        premium_html(
-            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-            "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
-            "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
-            f"◈ Активная — <code>{cur}</code>\n"
-            "◈ 🔒 — только с подпиской\n"
-            "◈ 📸 — поддерживает анализ фото\n\n"
-            "▾ Выбери модель\n"
-            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-        ),
+        premium_html(_model_sub_menu_text(uid)),
         parse_mode="HTML", reply_markup=ai_menu_kb(uid),
     )
     await callback.answer()
@@ -13457,7 +13544,32 @@ async def set_model(callback: CallbackQuery):
     # Проверяем что модель не отключена
     if key in disabled_models and key != "auto":
         return await callback.answer("🚫 Модель временно недоступна", show_alert=True)
-    if key in PREMIUM_MODELS and not has_active_sub(uid):
+
+    has_sub = has_active_sub(uid)
+
+    # Веб-поиск: без подписки доступна только sonar (базовый)
+    if key in _MODEL_WEB_KEYS and key != _WEB_FREE_KEY and not has_sub:
+        await callback.answer("🔒 Доступно только по подписке", show_alert=True)
+        try:
+            await callback.message.edit_text(
+                "🔒 <b>Эта модель веб-поиска доступна только по подписке</b>\n\n"
+                "💎 Оформи подписку и получи доступ ко всем моделям Sonar!\n"
+                "Без подписки доступна: 🌐 Sonar Web\n\n"
+                "⚡ 7 дней — 60 ₽\n"
+                "💎 30 дней — 100 ₽",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="💎 Оформить подписку", callback_data="sub_menu")],
+                    [InlineKeyboardButton(text="◀️ Веб-поиск", callback_data="modelcat_web")],
+                    [InlineKeyboardButton(text="🏠 Главная", callback_data="back_home")],
+                ])
+            )
+        except Exception:
+            pass
+        return
+
+    # Платные модели: без подписки недоступны
+    if key in PREMIUM_MODELS and not has_sub:
         await callback.answer("🔒 Нужна подписка!", show_alert=True)
         try:
             await callback.message.edit_text(
@@ -13468,34 +13580,43 @@ async def set_model(callback: CallbackQuery):
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="💎 Оформить подписку", callback_data="sub_menu")],
+                    [InlineKeyboardButton(text="◀️ Платные модели", callback_data="modelcat_paid")],
                     [InlineKeyboardButton(text="🤖 Другие модели", callback_data="menu_ai")],
                 ])
             )
         except Exception:
             pass
         return
+
     set_chat_model(uid, key)
     user_memory[uid] = deque(maxlen=20)
     asyncio.create_task(db_save_user(uid))
-    m   = MODELS[key]
-    if key == "auto":
-        label = "⚡ Авто"
-    else:
-        label = m["label"]
-    # Показываем обновлённое меню с подсветкой выбранной модели
-    new_cur = label
-    menu_text = premium_html(
-        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-        "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
-        "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
-        f"◈ Активная — <code>{new_cur}</code>\n"
-        "◈ 🔒 — только с подпиской\n"
-        "◈ 📸 — поддерживает анализ фото\n\n"
-        "▾ Выбери модель\n"
-        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-    )
+    m = MODELS[key]
+    label = "⚡ Авто" if key == "auto" else m["label"]
+
+    # После выбора возвращаемся в нужное подменю (по категории выбранной модели)
+    def _back_cat_kb() -> InlineKeyboardMarkup:
+        if key in _MODEL_WEB_KEYS:
+            return _modelcat_web_kb(uid)
+        if m.get("premium"):
+            return _modelcat_paid_kb(uid)
+        if key == "auto":
+            return ai_menu_kb(uid)
+        return _modelcat_free_kb(uid)
+
+    def _back_cat_text() -> str:
+        if key in _MODEL_WEB_KEYS:
+            return f"🌐 <b>Веб-поиск (Sonar)</b>\n\n✅ Выбрана модель: <code>{label}</code>"
+        if m.get("premium"):
+            return f"🔥 <b>Платные модели</b>\n\n✅ Выбрана модель: <code>{label}</code>"
+        if key == "auto":
+            return premium_html(_model_sub_menu_text(uid))
+        return f"🆓 <b>Бесплатные модели</b>\n\n✅ Выбрана модель: <code>{label}</code>"
+
     try:
-        await callback.message.edit_text(menu_text, parse_mode="HTML", reply_markup=ai_menu_kb(uid))
+        await callback.message.edit_text(
+            _back_cat_text(), parse_mode="HTML", reply_markup=_back_cat_kb()
+        )
     except Exception:
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🤖 Выбрать модель", callback_data="menu_ai")],
@@ -13505,7 +13626,7 @@ async def set_model(callback: CallbackQuery):
             f"✅ <b>Модель изменена на {label}</b>\n\n✏️ Пиши вопрос:",
             parse_mode="HTML", reply_markup=kb
         )
-    await callback.answer(f"✅ Модель изменена на {label}")
+    await callback.answer(f"✅ Модель: {label}")
 
 
 @dp.callback_query(F.data.startswith("imgset_"))
