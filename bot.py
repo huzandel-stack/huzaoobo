@@ -1611,6 +1611,26 @@ async def init_db():
                     value TEXT DEFAULT ''
                 )
             """)
+            # ── Таблица платежей (идемпотентность — повторный вебхук не зачислит дважды) ──
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS payments (
+                    transaction_id TEXT PRIMARY KEY,
+                    uid            BIGINT,
+                    plan           TEXT,
+                    amount         INT  DEFAULT 0,
+                    created_at     TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            # ── История чатов из Mini App ──
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_history (
+                    uid        BIGINT,
+                    session_id TEXT,
+                    messages   JSONB        DEFAULT '[]'::jsonb,
+                    updated_at TIMESTAMPTZ  DEFAULT NOW(),
+                    PRIMARY KEY (uid, session_id)
+                )
+            """)
         logging.info("✅ PostgreSQL подключена")
     except Exception as e:
         logging.error(f"❌ PostgreSQL: {e}")
@@ -3467,7 +3487,10 @@ async def call_chat(messages: list, model_key: str, max_tokens: int = 1500) -> s
         "glm47":        "qwen3_max",
     }
 
-    for attempt in range(2):
+    # Задержки между попытками: 1-я retry → 2 сек, 2-я retry → 5 сек
+    _retry_delays = [0, 2, 5]
+
+    for attempt in range(3):
         try:
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=_tmo, connect=20)
@@ -3511,12 +3534,25 @@ async def call_chat(messages: list, model_key: str, max_tokens: int = 1500) -> s
                     if not result:
                         result = "..."
                     return result
-        except aiohttp.ServerDisconnectedError:
-            logging.warning(f"ServerDisconnected attempt {attempt+1} {m['name']}")
-            await asyncio.sleep(3)
+        except aiohttp.ServerDisconnectedError as e:
+            logging.warning(f"[call_chat] ServerDisconnected попытка {attempt+1}/3 {m['name']}")
+            if attempt < 2:
+                await asyncio.sleep(_retry_delays[attempt + 1])
+            else:
+                raise RuntimeError(f"Server disconnected x3: {m['name']}")
+        except (RuntimeError, aiohttp.ClientError) as e:
+            # Retry при сетевых ошибках и RuntimeError (не при 401/403 — там бессмысленно)
+            if attempt < 2:
+                delay = _retry_delays[attempt + 1]
+                logging.warning(f"[call_chat] ошибка попытка {attempt+1}/3, retry через {delay}с: {e}")
+                await asyncio.sleep(delay)
+            else:
+                logging.error(f"[call_chat] все 3 попытки исчерпаны: {e}")
+                raise
         except Exception as e:
+            # Непредвиденные ошибки — не ретраим, бросаем сразу
             raise e
-    raise RuntimeError(f"Server disconnected x2: {m['name']}")
+    raise RuntimeError(f"call_chat: все попытки исчерпаны для {m['name']}")
 
 
 # ── Запрещённые слова для промптов изображений (автозамена/удаление) ──────────
@@ -4487,6 +4523,48 @@ async def cmd_start(message: Message):
     _init_tokens(uid)
     _init_limits(uid)
 
+    # ── Реферальная система ──
+    msg_text = message.text or ""
+    if "ref_" in msg_text:
+        try:
+            ref_part = msg_text.split("ref_", 1)[1].strip().split()[0]
+            inviter_uid = int(ref_part)
+            # Проверяем что пользователь ещё не был зарегистрирован по рефералу
+            already_referred = any(
+                uid in data.get("refs", [])
+                for data in user_referrals.values()
+            )
+            # Не начисляем самому себе и не начисляем повторно
+            if inviter_uid != uid and not already_referred and inviter_uid in user_limits:
+                # Инициализируем структуру рефералов для инвайтера
+                if inviter_uid not in user_referrals:
+                    user_referrals[inviter_uid] = {"refs": []}
+                user_referrals[inviter_uid]["refs"].append(uid)
+                # Бонус инвайтеру: снижаем pro_used (эффективно добавляем запросы)
+                _init_limits(inviter_uid)
+                user_limits[inviter_uid]["pro_used"] = max(
+                    0, user_limits[inviter_uid]["pro_used"] - REF_BONUS_INVITER
+                )
+                asyncio.create_task(db_save_user(inviter_uid))
+                # Бонус новому пользователю
+                user_limits[uid]["pro_used"] = max(
+                    0, user_limits[uid]["pro_used"] - REF_BONUS_NEW
+                )
+                logging.info(f"[REF] uid={uid} пришёл по реферу от uid={inviter_uid}")
+                # Уведомляем инвайтера
+                try:
+                    await bot.send_message(
+                        inviter_uid,
+                        f"🎉 <b>По вашей реферальной ссылке зарегистрировался новый пользователь!</b>\n\n"
+                        f"✅ Вам начислено <b>+{REF_BONUS_INVITER} запросов</b>\n"
+                        f"👥 Всего приглашено: <b>{len(user_referrals[inviter_uid]['refs'])}</b>",
+                        parse_mode="HTML"
+                    )
+                except Exception as _ref_e:
+                    logging.warning(f"[REF] не удалось уведомить inviter={inviter_uid}: {_ref_e}")
+        except (ValueError, IndexError):
+            pass  # некорректный реф-код — просто игнорируем
+
     # Trial для новых
     _is_brand_new = uid not in user_trials and not has_active_sub(uid)
     # Trial disabled
@@ -5229,8 +5307,10 @@ async def _do_video_gen(message: Message, uid: int, prompt: str, mode: str, imag
         pass
 
     async with ChatActionSender.upload_video(bot=bot, chat_id=message.chat.id):
+        _gen_start = asyncio.get_event_loop().time()  # Засекаем время генерации
         try:
             video_bytes = await generate_video_pollinations(enhanced, image_base64=image_base64, tg_file_path=tg_file_path)
+            _gen_elapsed = asyncio.get_event_loop().time() - _gen_start
 
             try:
                 await wait_msg.delete()
@@ -5269,6 +5349,18 @@ async def _do_video_gen(message: Message, uid: int, prompt: str, mode: str, imag
                 logging.warning(f"answer_video failed: {ve}, sending as document")
                 video_file2 = BufferedInputFile(video_bytes, filename="grok_video.mp4")
                 await message.answer_document(video_file2, caption=caption, parse_mode="HTML", reply_markup=vid_kb)
+
+            # Если генерация заняла больше 45 секунд — шлём отдельное уведомление
+            # (пользователь мог уйти из чата пока ждал)
+            if _gen_elapsed > 45:
+                try:
+                    await bot.send_message(
+                        uid,
+                        "✅ <b>Твоё видео готово!</b> 🎬\n\nГенерация заняла больше минуты — вот результат выше 👆",
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
 
             # Сохраняем для кнопки «Ещё вариант»
             last_responses[uid] = {
@@ -16203,6 +16295,7 @@ async def _do_music_gen(message, uid: int, state: dict, instrumental: bool = Fal
             pass
 
         # Шаг 3: запрос к выбранной модели через Pollinations
+        _music_gen_start = asyncio.get_event_loop().time()  # Засекаем время
         if music_model == "elevenlabs":
             el_prompt = f"{style_tags}, {prompt_clean}" if style_tags else prompt_clean
             if instrumental:
@@ -16218,6 +16311,18 @@ async def _do_music_gen(message, uid: int, state: dict, instrumental: bool = Fal
             await wait_msg.delete()
         except Exception:
             pass
+
+        # Если генерация заняла больше 45 секунд — шлём отдельное уведомление
+        _music_elapsed = asyncio.get_event_loop().time() - _music_gen_start
+        if _music_elapsed > 45:
+            try:
+                await bot.send_message(
+                    uid,
+                    "✅ <b>Твой трек готов!</b> 🎵\n\nГенерация заняла больше минуты — вот результат выше 👆",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
 
         # Шаг 4: отправляем результат
         spend_music(uid)
@@ -18182,6 +18287,18 @@ async def platega_callback_handler(request: aiohttp_web.Request) -> aiohttp_web.
 
         plan = SUB_PLANS[plan_key]
 
+        # ── Идемпотентность: проверяем, не обрабатывали ли уже этот transaction_id ──
+        transaction_id = body.get("transactionId", "") or body.get("transaction_id", "")
+        if transaction_id and db_pool:
+            async with db_pool.acquire() as conn_pay:
+                exists = await conn_pay.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM payments WHERE transaction_id=$1)",
+                    str(transaction_id)
+                )
+            if exists:
+                logging.info(f"[PLATEGA CB] дубликат transaction_id={transaction_id}, пропускаем")
+                return aiohttp_web.Response(text="ok")
+
         # Активируем подписку (та же логика что в successful_payment_handler)
         existing = user_subscriptions.get(uid)
         if existing and existing["expires"] > msk_now():
@@ -18192,6 +18309,20 @@ async def platega_callback_handler(request: aiohttp_web.Request) -> aiohttp_web.
         user_subscriptions[uid] = {"expires": new_exp, "plan": plan_key}
         asyncio.create_task(db_save_subscription(uid))
         logging.info(f"[PLATEGA CB] uid={uid} plan={plan_key} activated until {new_exp}")
+
+        # Сохраняем transaction_id чтобы повторный вебхук не зачислил снова
+        if transaction_id and db_pool:
+            async def _save_payment():
+                try:
+                    async with db_pool.acquire() as _c:
+                        await _c.execute(
+                            "INSERT INTO payments(transaction_id, uid, plan, amount) "
+                            "VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
+                            str(transaction_id), uid, plan_key, plan.get("price", 0)
+                        )
+                except Exception as _e:
+                    logging.error(f"[PLATEGA CB] save payment error: {_e}")
+            asyncio.create_task(_save_payment())
 
         exp = sub_expires_str(uid)
         try:
@@ -18368,6 +18499,101 @@ async def api_report_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             status=500, headers=headers)
 
 
+async def api_history_get_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    """GET /api/history?uid=X&init_data=Y — возвращает последние 20 сессий пользователя."""
+    _cors = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+    }
+    try:
+        uid_str   = request.rel_url.query.get("uid", "")
+        init_data = request.rel_url.query.get("init_data", "")
+        if not uid_str:
+            return aiohttp_web.Response(
+                content_type="application/json", headers=_cors,
+                text=json.dumps({"ok": False, "error": "uid required"})
+            )
+        uid = int(uid_str)
+        if not db_pool:
+            return aiohttp_web.Response(
+                content_type="application/json", headers=_cors,
+                text=json.dumps({"ok": True, "sessions": []})
+            )
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT session_id, messages, updated_at FROM chat_history "
+                "WHERE uid=$1 ORDER BY updated_at DESC LIMIT 20",
+                uid
+            )
+        sessions = []
+        for row in rows:
+            msgs_raw = row["messages"]
+            msgs = msgs_raw if isinstance(msgs_raw, list) else json.loads(msgs_raw or "[]")
+            sessions.append({
+                "id":         row["session_id"],
+                "messages":   msgs,
+                "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+            })
+        return aiohttp_web.Response(
+            content_type="application/json", headers=_cors,
+            text=json.dumps({"ok": True, "sessions": sessions}, ensure_ascii=False)
+        )
+    except Exception as e:
+        logging.error(f"[api_history_get] {e}")
+        return aiohttp_web.Response(
+            content_type="application/json", headers=_cors,
+            text=json.dumps({"ok": False, "error": str(e)})
+        )
+
+
+async def api_history_post_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    """POST /api/history — сохраняет или обновляет сессию чата."""
+    _cors = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+    }
+    if request.method == "OPTIONS":
+        return aiohttp_web.Response(status=204, headers=_cors)
+    try:
+        body       = await request.json()
+        uid        = int(body.get("uid", 0))
+        session_id = str(body.get("session_id", ""))
+        messages   = body.get("messages", [])
+        if not uid or not session_id:
+            return aiohttp_web.Response(
+                content_type="application/json", headers=_cors,
+                text=json.dumps({"ok": False, "error": "uid и session_id обязательны"})
+            )
+        if not db_pool:
+            return aiohttp_web.Response(
+                content_type="application/json", headers=_cors,
+                text=json.dumps({"ok": True})
+            )
+        # Храним только текстовые сообщения, максимум 40 последних
+        safe_msgs = [m for m in messages if isinstance(m.get("content"), str)][-40:]
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO chat_history (uid, session_id, messages, updated_at)
+                VALUES ($1, $2, $3::jsonb, NOW())
+                ON CONFLICT (uid, session_id) DO UPDATE
+                    SET messages=$3::jsonb, updated_at=NOW()
+                """,
+                uid, session_id, json.dumps(safe_msgs, ensure_ascii=False)
+            )
+        return aiohttp_web.Response(
+            content_type="application/json", headers=_cors,
+            text=json.dumps({"ok": True}, ensure_ascii=False)
+        )
+    except Exception as e:
+        logging.error(f"[api_history_post] {e}")
+        return aiohttp_web.Response(
+            content_type="application/json", headers=_cors,
+            text=json.dumps({"ok": False, "error": str(e)})
+        )
+
+
 async def start_api_server():
     app = aiohttp_web.Application(client_max_size=20 * 1024 * 1024)  # 20MB для base64 фото
     app.router.add_post("/suno_callback", suno_callback_handler)
@@ -18389,6 +18615,10 @@ async def start_api_server():
     app.router.add_options("/api/report", api_report_handler)
     app.router.add_get("/api/answer/{ans_id}", api_answer_handler)
     app.router.add_options("/api/answer/{ans_id}", api_answer_handler)
+    # История чатов из Mini App
+    app.router.add_get("/api/history", api_history_get_handler)
+    app.router.add_post("/api/history", api_history_post_handler)
+    app.router.add_options("/api/history", api_history_post_handler)
     # ✅ View.html раздаётся с Railway — GitHub Pages не нужен!
     app.router.add_get("/view", view_page_handler)
     app.router.add_get("/View.html", view_page_handler)  # Алиас для совместимости
@@ -18397,6 +18627,66 @@ async def start_api_server():
     site = aiohttp_web.TCPSite(runner, "0.0.0.0", API_PORT)
     await site.start()
     logging.info(f"✅ API сервер запущен на порту {API_PORT}")
+
+
+# ── Фоновый сброс лимитов каждые 30 минут ────────────────────────────────────
+async def _background_refresh_limits():
+    """Каждые 30 минут вызывает _refresh_limits для всех пользователей в user_limits."""
+    while True:
+        await asyncio.sleep(30 * 60)
+        uids = list(user_limits.keys())
+        for _uid in uids:
+            try:
+                _refresh_limits(_uid)
+            except Exception as _e:
+                logging.warning(f"[bg_refresh] uid={_uid}: {_e}")
+        logging.info(f"[bg_refresh] сброс лимитов для {len(uids)} пользователей")
+
+
+# ── Фоновая проверка истекающих подписок раз в 6 часов ───────────────────────
+async def check_expiring_subs():
+    """Раз в 6 часов находит подписки которые истекают через ≤3 дня и шлёт уведомление."""
+    while True:
+        await asyncio.sleep(6 * 3600)
+        now = msk_now()
+        deadline = now + datetime.timedelta(days=3)
+        notified = 0
+        for _uid, sub in list(user_subscriptions.items()):
+            try:
+                expires = sub.get("expires")
+                if not expires:
+                    continue
+                # Уже истекла или истекает позже 3 дней — пропускаем
+                if expires <= now or expires > deadline:
+                    continue
+                # Не спамим: флаг notified_expiry сбрасывается когда подписку продлили
+                if sub.get("notified_expiry"):
+                    continue
+                plan_key = sub.get("plan", "")
+                plan_name = SUB_PLANS.get(plan_key, {}).get("name", plan_key)
+                days_left = (expires - now).days
+                try:
+                    await bot.send_message(
+                        _uid,
+                        f"⏰ <b>Подписка заканчивается!</b>\n\n"
+                        f"💎 Тариф: <b>{plan_name}</b>\n"
+                        f"📅 Осталось: <b>{days_left} дн.</b>\n\n"
+                        f"Продли подписку чтобы не потерять доступ к возможностям бота.",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                            [InlineKeyboardButton(text="💎 Продлить подписку", callback_data="sub_menu")],
+                            [InlineKeyboardButton(text="🏠 Главное меню",      callback_data="back_home")],
+                        ])
+                    )
+                    # Ставим флаг чтобы не слать повторно
+                    user_subscriptions[_uid]["notified_expiry"] = True
+                    notified += 1
+                except Exception as _send_e:
+                    logging.warning(f"[expiry] uid={_uid}: {_send_e}")
+            except Exception as _e:
+                logging.warning(f"[expiry_check] uid={_uid}: {_e}")
+        if notified:
+            logging.info(f"[expiry] отправлено {notified} уведомлений об истечении подписки")
 
 
 async def main():
@@ -18439,6 +18729,9 @@ async def main():
         logging.info(f"✅ WebApp кнопка слева установлена: {MINI_APP_URL}")
     except Exception as e:
         logging.warning(f"set_chat_menu_button: {e}")
+    # ── Фоновые задачи ──
+    asyncio.create_task(_background_refresh_limits())  # Сброс лимитов каждые 30 мин
+    asyncio.create_task(check_expiring_subs())          # Уведомления об истечении подписки
     # Запускаем API сервер параллельно с ботом
     await start_api_server()
     await dp.start_polling(bot)
