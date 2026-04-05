@@ -2,6 +2,58 @@ import asyncio
 import logging
 import json
 import aiohttp
+
+import hmac as _hmac_mod
+import hashlib as _hashlib_mod
+import urllib.parse as _urlparse_mod
+import time as _time_global
+
+def verify_telegram_init_data(init_data: str, bot_token: str) -> "tuple[bool, int]":
+    """Верификация initData по алгоритму Telegram Mini Apps (HMAC-SHA256)."""
+    if not init_data or not bot_token:
+        return False, 0
+    try:
+        params = dict(_urlparse_mod.parse_qsl(init_data, keep_blank_values=True))
+        hash_val = params.pop("hash", "")
+        if not hash_val:
+            return False, 0
+        auth_date = int(params.get("auth_date", 0))
+        if abs(_time_global.time() - auth_date) > 600:
+            return False, 0
+        data_check = "\n".join(f"{k}={v}" for k, v in sorted(params.items()))
+        secret_key = _hmac_mod.new(b"WebAppData", bot_token.encode(), _hashlib_mod.sha256).digest()
+        expected = _hmac_mod.new(secret_key, data_check.encode(), _hashlib_mod.sha256).hexdigest()
+        if not _hmac_mod.compare_digest(expected, hash_val):
+            return False, 0
+        user_json = params.get("user", "")
+        uid = 0
+        if user_json:
+            import json as _jj
+            uid = int(_jj.loads(user_json).get("id", 0))
+        return True, uid
+    except Exception:
+        return False, 0
+
+
+# IP Rate Limiting (sliding window по IP для открытых API)
+_ip_windows: dict = {}
+_IP_WINDOW_SECS = 60
+_IP_MAX_REQUESTS = 30
+
+def _check_ip_rate_limit(ip: str) -> bool:
+    """True = можно обработать запрос, False = rate limit превышен."""
+    from collections import deque as _dq
+    now = _time_global.time()
+    if ip not in _ip_windows:
+        _ip_windows[ip] = _dq()
+    dq = _ip_windows[ip]
+    while dq and now - dq[0] > _IP_WINDOW_SECS:
+        dq.popleft()
+    if len(dq) >= _IP_MAX_REQUESTS:
+        return False
+    dq.append(now)
+    return True
+
 async def check_ip():
     async with aiohttp.ClientSession() as session:
         async with session.get("https://api.ipify.org") as resp:
@@ -1308,6 +1360,18 @@ SUB_PLANS = {
         "video_month": 3,
         "reset_h":     12,
     },
+    "year": {
+        "name":        "🏆 Год",
+        "price":       800,
+        "days":        365,
+        "label":       "🏆 365 дней — 800 ₽",
+        "description": "365 дней полного доступа (экономия 400 ₽!)",
+        "pro_day":     100,
+        "img_month":   50,
+        "music_month": 5,
+        "video_month": 5,
+        "reset_h":     12,
+    },
 }
 
 # uid -> {"expires": datetime, "plan": "week"/"month"}
@@ -1383,9 +1447,10 @@ async def db_load_subscriptions():
 def sub_buy_kb() -> InlineKeyboardMarkup:
     """Клавиатура выбора тарифа при покупке."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚡ 7 дней — 60 ₽",  callback_data="sub_buy_week")],
-        [InlineKeyboardButton(text="💎 30 дней — 100 ₽", callback_data="sub_buy_month")],
-        [InlineKeyboardButton(text="🏠 Назад",           callback_data="back_home")],
+        [InlineKeyboardButton(text="⚡ 7 дней — 60 ₽",    callback_data="sub_buy_week")],
+        [InlineKeyboardButton(text="💎 30 дней — 100 ₽",  callback_data="sub_buy_month")],
+        [InlineKeyboardButton(text="🏆 365 дней — 800 ₽", callback_data="sub_buy_year")],
+        [InlineKeyboardButton(text="🏠 Назад",             callback_data="back_home")],
     ])
 
 
@@ -1631,6 +1696,36 @@ async def init_db():
                     PRIMARY KEY (uid, session_id)
                 )
             """)
+            # Задача 9: GIN индекс для полнотекстового поиска по истории
+            try:
+                await conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_chat_history_messages_gin "
+                    "ON chat_history USING gin((messages::text) gin_trgm_ops)"
+                )
+            except Exception:
+                try:
+                    await conn.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_chat_history_messages_gin "
+                        "ON chat_history USING gin(to_tsvector('russian', messages::text))"
+                    )
+                except Exception:
+                    pass  # Индекс создастся позже вручную если нужно
+            # Задача 11: таблица аналитики использования моделей
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS model_stats (
+                    id         BIGSERIAL PRIMARY KEY,
+                    uid        BIGINT,
+                    model_key  TEXT,
+                    tokens_in  INT DEFAULT 0,
+                    tokens_out INT DEFAULT 0,
+                    ts         TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            try:
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_model_stats_uid ON model_stats(uid)")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_model_stats_ts ON model_stats(ts)")
+            except Exception:
+                pass
         logging.info("✅ PostgreSQL подключена")
     except Exception as e:
         logging.error(f"❌ PostgreSQL: {e}")
@@ -2100,9 +2195,36 @@ def can_send(uid: int, model_key: str):
         return False, "pro"
     return True, ""
 
+
+async def _db_save_limits(uid: int):
+    """Быстрое сохранение только счётчиков лимитов в БД после каждого spend."""
+    if not db_pool:
+        return
+    lim = user_limits.get(uid, {})
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE users SET
+                    pro_used=$1, img_used=$2, music_used=$3, video_used=$4,
+                    fast_used=$5, pro_reset=$6, img_reset=$7,
+                    music_reset=$8, video_reset=$9
+                WHERE uid=$10
+            """,
+                lim.get("pro_used", 0), lim.get("img_used", 0),
+                lim.get("music_used", 0), lim.get("video_used", 0),
+                lim.get("fast_used", 0),
+                lim.get("pro_reset"), lim.get("img_reset"),
+                lim.get("music_reset"), lim.get("video_reset"),
+                uid
+            )
+    except Exception as e:
+        logging.warning(f"_db_save_limits uid={uid}: {e}")
+
 def spend_limit(uid: int, model_key: str):
     _refresh_limits(uid)
     user_limits[uid]["pro_used"] += 1
+    asyncio.ensure_future(_db_save_limits(uid))
+    asyncio.ensure_future(_db_log_model_usage(uid, model_key))  # Задача 11
 
 
 def can_img(uid: int) -> bool:
@@ -2114,6 +2236,7 @@ def spend_img(uid: int):
     _refresh_limits(uid)
     user_limits[uid]["img_used"] += 1
     user_images_count[uid] = user_images_count.get(uid, 0) + 1
+    asyncio.ensure_future(_db_save_limits(uid))
 
 def can_music(uid: int) -> bool:
     if uid in ADMIN_IDS:
@@ -2127,6 +2250,7 @@ def can_music(uid: int) -> bool:
 def spend_music(uid: int):
     _refresh_limits(uid)
     user_limits[uid]["music_used"] = user_limits[uid].get("music_used", 0) + 1
+    asyncio.ensure_future(_db_save_limits(uid))
 
 def can_video(uid: int) -> bool:
     if uid in ADMIN_IDS:
@@ -2140,6 +2264,7 @@ def can_video(uid: int) -> bool:
 def spend_video(uid: int):
     _refresh_limits(uid)
     user_limits[uid]["video_used"] = user_limits[uid].get("video_used", 0) + 1
+    asyncio.ensure_future(_db_save_limits(uid))
 
 def _reset_str(uid: int, kind: str) -> str:
     _init_limits(uid)
@@ -17427,6 +17552,17 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
     if request.method == "OPTIONS":
         return aiohttp_web.Response(status=200, headers=headers)
 
+    _client_ip = (request.headers.get("X-Forwarded-For", "") or request.remote or "unknown").split(",")[0].strip()
+    if not _check_ip_rate_limit(_client_ip):
+        import json as _j
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": "rate_limit_exceeded"}, ensure_ascii=False),
+            status=429, headers={
+                "Access-Control-Allow-Origin": "*",
+                "Content-Type": "application/json",
+            }
+        )
+
     try:
         # Читаем сырое тело с большим лимитом (20MB) — иначе aiohttp режет при больших base64
         raw = await request.read()
@@ -17439,8 +17575,20 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
         )
 
     action  = data.get("action", "chat")
-    uid     = int(data.get("uid", 0) or 0)
     text    = data.get("text", "").strip()
+
+    # ── HMAC верификация initData (задача 1) ────────────────────────
+    _init_data_chat = data.get("init_data", "")
+    _verified_chat_uid = 0
+    if _init_data_chat:
+        _ok_hmac_chat, _verified_chat_uid = verify_telegram_init_data(_init_data_chat, TELEGRAM_TOKEN)
+        if not _ok_hmac_chat:
+            return aiohttp_web.Response(
+                text=_j.dumps({"ok": False, "error": "invalid_init_data"}, ensure_ascii=False),
+                status=403, headers=headers
+            )
+    _raw_uid_chat = int(data.get("uid", 0) or 0)
+    uid = _verified_chat_uid or (_raw_uid_chat if _raw_uid_chat in ADMIN_IDS else 0)
     # Фронт шлёт либо "image" (строка base64) либо "images" (массив) — принимаем оба формата
     _img_single = data.get("image")
     images  = data.get("images", [])
@@ -17458,25 +17606,10 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
                     text = content
                 break
 
-    # If uid not sent, try to extract from Telegram init_data
-    if not uid:
-        try:
-            import urllib.parse as _up
-            _idata = data.get("init_data", "")
-            if _idata:
-                _params = dict(_up.parse_qsl(_idata))
-                _user_json = _params.get("user", "")
-                if _user_json:
-                    import json as _jj
-                    _uobj = _jj.loads(_user_json)
-                    uid = int(_uobj.get("id", 0))
-        except Exception:
-            pass
-
     if not uid:
         return aiohttp_web.Response(
-            text=_j.dumps({"ok": False, "error": "No uid"}, ensure_ascii=False),
-            status=400, headers=headers
+            text=_j.dumps({"ok": False, "error": "auth_required"}, ensure_ascii=False),
+            status=401, headers=headers
         )
 
     # Проверка подписки
@@ -17672,6 +17805,33 @@ async def api_chat_handler(request: aiohttp_web.Request) -> aiohttp_web.Response
             user_profiles[uid]["requests"] = user_profiles[uid].get("requests", 0) + 1
 
         li = get_limits_info(uid)
+
+        # ── SSE стриминг (Задача 4) ─────────────────────────────────
+        want_stream = data.get("stream", False)
+        if want_stream:
+            sse_headers = dict(headers)
+            sse_headers["Content-Type"] = "text/event-stream"
+            sse_headers["Cache-Control"] = "no-cache"
+            sse_headers["X-Accel-Buffering"] = "no"
+            sse_headers.pop("Content-Type", None)
+            resp = aiohttp_web.StreamResponse(headers={
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Access-Control-Allow-Origin": "*",
+            })
+            await resp.prepare(request)
+            # Отправляем ответ чанками по ~80 символов для имитации стриминга
+            chunk_size = 80
+            for i in range(0, len(ans), chunk_size):
+                chunk = ans[i:i+chunk_size]
+                chunk_json = _j.dumps({"choices": [{"delta": {"content": chunk}}]}, ensure_ascii=False)
+                await resp.write(("data: " + chunk_json + "\n\n").encode("utf-8"))
+                await asyncio.sleep(0.01)
+            await resp.write(b"data: [DONE]\n\n")
+            await resp.write_eof()
+            return resp
+
         return aiohttp_web.Response(
             text=_j.dumps({
                 "ok": True,
@@ -17783,6 +17943,34 @@ async def api_limits_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
     )
 
 
+
+# ── Очередь генерации изображений (Задача 6) ────────────────────────────────
+_img_gen_queue: asyncio.Queue = asyncio.Queue()
+
+async def _img_gen_worker():
+    """Воркер очереди — обрабатывает запросы на генерацию изображений по одному."""
+    while True:
+        try:
+            task = await _img_gen_queue.get()
+            fut: asyncio.Future = task["future"]
+            try:
+                result = await generate_image(task["prompt"], task["model"], task["ratio"])
+                fut.set_result(result)
+            except Exception as e:
+                fut.set_exception(e)
+            finally:
+                _img_gen_queue.task_done()
+        except Exception as e:
+            logging.error(f"_img_gen_worker: {e}")
+
+async def enqueue_image_gen(prompt: str, model: str, ratio: str) -> dict:
+    """Добавляет задачу в очередь и ждёт результата. Если очередь занята — сообщает позицию."""
+    loop = asyncio.get_event_loop()
+    fut = loop.create_future()
+    pos = _img_gen_queue.qsize() + 1
+    await _img_gen_queue.put({"prompt": prompt, "model": model, "ratio": ratio, "future": fut})
+    return pos, fut
+
 async def api_imggen_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
     """POST /api/imggen — генерация изображений из мини-аппа."""
     import json as _j, base64 as _b64
@@ -17794,6 +17982,11 @@ async def api_imggen_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
     }
     if request.method == "OPTIONS":
         return aiohttp_web.Response(status=200, headers=headers)
+    _client_ip = (request.headers.get("X-Forwarded-For", "") or request.remote or "unknown").split(",")[0].strip()
+    if not _check_ip_rate_limit(_client_ip):
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": "rate_limit_exceeded"}, ensure_ascii=False),
+            status=429, headers=headers)
     try:
         raw = await request.read()
         data = _j.loads(raw.decode("utf-8"))
@@ -17802,7 +17995,17 @@ async def api_imggen_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
             text=_j.dumps({"ok": False, "error": "Invalid JSON"}, ensure_ascii=False),
             status=400, headers=headers)
 
-    uid    = int(data.get("uid", 0))
+    # ── HMAC верификация ────────────────────────────────────────────
+    _init_data_img = data.get("init_data", "")
+    _verified_img_uid = 0
+    if _init_data_img:
+        _ok_hmac_img, _verified_img_uid = verify_telegram_init_data(_init_data_img, TELEGRAM_TOKEN)
+        if not _ok_hmac_img:
+            return aiohttp_web.Response(
+                text=_j.dumps({"ok": False, "error": "invalid_init_data"}, ensure_ascii=False),
+                status=403, headers=headers)
+    _raw_uid = int(data.get("uid", 0) or 0)
+    uid = _verified_img_uid or (_raw_uid if _raw_uid in ADMIN_IDS else 0)
     prompt = data.get("prompt", "").strip()
     model  = data.get("model", "flux_klein9")
     ratio  = data.get("ratio", "1:1")
@@ -17835,7 +18038,10 @@ async def api_imggen_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
         model = "flux_klein9"
 
     try:
-        result = await generate_image(prompt, model, ratio)
+        pos, fut = await enqueue_image_gen(prompt, model, ratio)
+        if pos > 1:
+            logging.info(f"[imggen] uid={uid} в очереди, позиция {pos}")
+        result = await asyncio.wait_for(fut, timeout=120)
         img_bytes = result["data"]
         img_b64 = _b64.b64encode(img_bytes).decode()
         spend_img(uid)
@@ -17848,8 +18054,13 @@ async def api_imggen_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
                 "image_b64": img_b64,
                 "model_label": IMG_MODELS[model]["label"],
                 "img_left": li["img_max"] - li["img_used"],
+                "queue_pos": pos,
             }, ensure_ascii=False),
             headers=headers)
+    except asyncio.TimeoutError:
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": "generation_timeout"}, ensure_ascii=False),
+            status=504, headers=headers)
     except Exception as e:
         logging.error(f"api_imggen error: {e}")
         return aiohttp_web.Response(
@@ -18594,6 +18805,304 @@ async def api_history_post_handler(request: aiohttp_web.Request) -> aiohttp_web.
         )
 
 
+
+
+# ── TTS через edge-tts (Задача 7) ────────────────────────────────────────────
+async def tts_generate(text: str, voice: str = "ru-RU-SvetlanaNeural") -> bytes | None:
+    """Генерирует озвучку текста через edge-tts. Возвращает mp3-байты или None."""
+    try:
+        import edge_tts  # pip install edge-tts
+        import tempfile, os
+        # Обрезаем очень длинные тексты
+        short = text[:800] if len(text) > 800 else text
+        tmp_path = tempfile.mktemp(suffix=".mp3")
+        communicate = edge_tts.Communicate(short, voice)
+        await communicate.save(tmp_path)
+        with open(tmp_path, "rb") as f:
+            data = f.read()
+        try:
+            os.remove(tmp_path)
+        except Exception:
+            pass
+        return data
+    except ImportError:
+        logging.warning("edge-tts не установлен. pip install edge-tts")
+        return None
+    except Exception as e:
+        logging.warning(f"tts_generate: {e}")
+        return None
+
+
+
+
+async def api_hints_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    """POST /api/hints — генерирует 3 подсказки для следующего вопроса (Задача 10)."""
+    import json as _j
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Content-Type": "application/json",
+    }
+    if request.method == "OPTIONS":
+        return aiohttp_web.Response(status=200, headers=headers)
+    try:
+        data = await request.json()
+    except Exception:
+        return aiohttp_web.Response(text=_j.dumps({"ok": False, "hints": []}, ensure_ascii=False), headers=headers)
+
+    last_answer = data.get("answer", "")[:500]
+    if not last_answer:
+        return aiohttp_web.Response(text=_j.dumps({"ok": True, "hints": []}, ensure_ascii=False), headers=headers)
+
+    try:
+        # Используем самую быструю доступную модель для подсказок
+        hint_model = next(
+            (k for k in ["gemini_flash_lite", "gemini_flash", "dsv3", "qwen"] if k in MODELS and k not in disabled_models),
+            None
+        )
+        if not hint_model:
+            return aiohttp_web.Response(text=_j.dumps({"ok": True, "hints": []}, ensure_ascii=False), headers=headers)
+
+        prompt = (
+            f"На основе этого ответа ИИ сгенерируй ровно 3 коротких уточняющих вопроса (до 7 слов каждый). "
+            f"Отвечай ТОЛЬКО JSON-массивом строк, без пояснений. "
+            f"Пример: [\"Вопрос 1?\", \"Вопрос 2?\", \"Вопрос 3?\"]. "
+            f"Ответ ИИ: {last_answer}"
+        )
+        hints_raw = await call_chat(
+            [{"role": "user", "content": prompt}],
+            hint_model,
+            max_tokens=200
+        )
+        # Парсим JSON
+        import re as _re
+        match = _re.search(r'\[.*?\]', hints_raw, _re.DOTALL)
+        hints = []
+        if match:
+            hints = _j.loads(match.group(0))
+            hints = [str(h)[:80] for h in hints[:3]]
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": True, "hints": hints}, ensure_ascii=False),
+            headers=headers
+        )
+    except Exception as e:
+        logging.warning(f"api_hints_handler: {e}")
+        return aiohttp_web.Response(text=_j.dumps({"ok": True, "hints": []}, ensure_ascii=False), headers=headers)
+
+async def api_history_search_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    """GET /api/history/search?uid=...&q=... — поиск по истории чатов (Задача 9)."""
+    import json as _j
+    headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Content-Type": "application/json",
+    }
+    uid_str = request.rel_url.query.get("uid", "0")
+    query = request.rel_url.query.get("q", "").strip()
+    try:
+        uid = int(uid_str)
+    except Exception:
+        uid = 0
+    if not uid or not query:
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "sessions": []}, ensure_ascii=False),
+            headers=headers
+        )
+    results = []
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT session_id, messages, updated_at FROM chat_history "
+                    "WHERE uid=$1 AND messages::text ILIKE $2 "
+                    "ORDER BY updated_at DESC LIMIT 20",
+                    uid, f"%{query}%"
+                )
+            for row in rows:
+                try:
+                    msgs = row["messages"]
+                    if isinstance(msgs, str):
+                        msgs = _j.loads(msgs)
+                    # Первое совпадающее сообщение как превью
+                    preview = ""
+                    for m in msgs:
+                        c = str(m.get("content", ""))
+                        if query.lower() in c.lower():
+                            preview = c[:120]
+                            break
+                    results.append({
+                        "id": row["session_id"],
+                        "t": preview[:40] + "..." if len(preview) > 40 else preview,
+                        "preview": preview,
+                        "updated_at": str(row["updated_at"]),
+                    })
+                except Exception:
+                    pass
+        except Exception as e:
+            logging.warning(f"api_history_search: {e}")
+    return aiohttp_web.Response(
+        text=_j.dumps({"ok": True, "sessions": results, "query": query}, ensure_ascii=False),
+        headers=headers
+    )
+
+async def api_export_pdf_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    """POST /api/export — экспортирует историю чата в PDF (Задача 8)."""
+    import json as _j
+    cors_headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+    }
+    if request.method == "OPTIONS":
+        return aiohttp_web.Response(status=200, headers=cors_headers)
+    try:
+        data = await request.json()
+    except Exception:
+        return aiohttp_web.Response(text="Bad JSON", status=400, headers=cors_headers)
+
+    uid = int(data.get("uid", 0))
+    session_id = data.get("session_id", "")
+    messages = data.get("messages", [])
+
+    if not messages and db_pool and session_id:
+        try:
+            async with db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT messages FROM chat_history WHERE uid=$1 AND session_id=$2",
+                    uid, session_id
+                )
+            if row:
+                messages = _j.loads(row["messages"]) if isinstance(row["messages"], str) else row["messages"]
+        except Exception as e:
+            logging.warning(f"api_export_pdf: db fetch: {e}")
+
+    if not messages:
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": "no_messages"}, ensure_ascii=False),
+            headers={**cors_headers, "Content-Type": "application/json"}
+        )
+
+    try:
+        from fpdf import FPDF
+        import io as _io
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.cell(0, 10, "HUZA AI - Chat Export", ln=True, align="C")
+        pdf.set_font("Helvetica", "", 9)
+        import datetime as _dt
+        pdf.cell(0, 6, f"Exported: {_dt.datetime.now().strftime('%d.%m.%Y %H:%M')} | UID: {uid}", ln=True, align="C")
+        pdf.ln(5)
+
+        for msg in messages:
+            role = msg.get("role", "")
+            content = str(msg.get("content", ""))
+            if not content:
+                continue
+            # Заголовок
+            pdf.set_fill_color(30, 30, 30) if role == "assistant" else pdf.set_fill_color(50, 50, 80)
+            pdf.set_font("Helvetica", "B", 10)
+            label = "🤖 Assistant" if role == "assistant" else "👤 User"
+            pdf.set_text_color(255, 255, 255) if role == "assistant" else pdf.set_text_color(200, 220, 255)
+            pdf.cell(0, 7, label, ln=True, fill=True)
+            # Тело
+            pdf.set_text_color(0, 0, 0)
+            pdf.set_font("Helvetica", "", 10)
+            # Убираем markdown
+            import re as _re
+            clean = _re.sub(r"[*_`#>]", "", content)
+            clean = _re.sub(r"\n+", "\n", clean)
+            pdf.multi_cell(0, 5, clean[:3000])
+            pdf.ln(2)
+
+        pdf_bytes = bytes(pdf.output())
+        return aiohttp_web.Response(
+            body=pdf_bytes,
+            headers={
+                **cors_headers,
+                "Content-Type": "application/pdf",
+                "Content-Disposition": f"attachment; filename=chat_{uid}_{session_id[:8]}.pdf",
+            }
+        )
+    except Exception as e:
+        logging.error(f"api_export_pdf: {e}")
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": str(e)[:200]}, ensure_ascii=False),
+            status=500, headers={**cors_headers, "Content-Type": "application/json"}
+        )
+
+
+async def _db_log_model_usage(uid: int, model_key: str, tokens_in: int = 0, tokens_out: int = 0):
+    """Логирует использование модели в model_stats (Задача 11)."""
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO model_stats (uid, model_key, tokens_in, tokens_out) VALUES ($1,$2,$3,$4)",
+                uid, model_key, tokens_in, tokens_out
+            )
+    except Exception as e:
+        logging.warning(f"_db_log_model_usage: {e}")
+
+
+async def admin_stats_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    """GET /admin/stats — аналитика использования моделей (Задача 11)."""
+    import json as _j
+    # Простая защита по секретному ключу
+    secret = os.getenv("ADMIN_SECRET", "")
+    if secret and request.rel_url.query.get("secret", "") != secret:
+        return aiohttp_web.Response(text="403 Forbidden", status=403)
+    if not db_pool:
+        return aiohttp_web.Response(text=_j.dumps({"ok": False, "error": "no_db"}), content_type="application/json")
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT model_key,
+                       COUNT(*) as requests,
+                       SUM(tokens_in) as total_in,
+                       SUM(tokens_out) as total_out,
+                       COUNT(DISTINCT uid) as unique_users
+                FROM model_stats
+                WHERE ts > NOW() - INTERVAL '30 days'
+                GROUP BY model_key
+                ORDER BY requests DESC
+            """)
+            daily = await conn.fetch("""
+                SELECT DATE_TRUNC('day', ts) as day, COUNT(*) as cnt
+                FROM model_stats
+                WHERE ts > NOW() - INTERVAL '7 days'
+                GROUP BY day ORDER BY day
+            """)
+        stats = [dict(r) for r in rows]
+        for s in stats:
+            for k in s:
+                if hasattr(s[k], 'isoformat'):
+                    s[k] = str(s[k])
+        daily_data = [{"day": str(r["day"])[:10], "count": r["cnt"]} for r in daily]
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": True, "models": stats, "daily": daily_data}, ensure_ascii=False),
+            content_type="application/json",
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+    except Exception as e:
+        return aiohttp_web.Response(
+            text=_j.dumps({"ok": False, "error": str(e)[:200]}),
+            content_type="application/json"
+        )
+
+async def tg_webhook_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
+    """POST /tg_webhook — принимает обновления от Telegram (Задача 5)."""
+    try:
+        data = await request.json()
+        from aiogram.types import Update
+        update = Update(**data)
+        await dp.feed_update(bot, update)
+    except Exception as e:
+        logging.error(f"tg_webhook_handler: {e}")
+    return aiohttp_web.Response(text="ok")
+
 async def start_api_server():
     app = aiohttp_web.Application(client_max_size=20 * 1024 * 1024)  # 20MB для base64 фото
     app.router.add_post("/suno_callback", suno_callback_handler)
@@ -18619,9 +19128,16 @@ async def start_api_server():
     app.router.add_get("/api/history", api_history_get_handler)
     app.router.add_post("/api/history", api_history_post_handler)
     app.router.add_options("/api/history", api_history_post_handler)
+    app.router.add_post("/api/export", api_export_pdf_handler)
+    app.router.add_options("/api/export", api_export_pdf_handler)
+    app.router.add_get("/api/history/search", api_history_search_handler)
+    app.router.add_post("/api/hints", api_hints_handler)
+    app.router.add_options("/api/hints", api_hints_handler)
     # ✅ View.html раздаётся с Railway — GitHub Pages не нужен!
+    app.router.add_post("/tg_webhook", tg_webhook_handler)
     app.router.add_get("/view", view_page_handler)
     app.router.add_get("/View.html", view_page_handler)  # Алиас для совместимости
+    app.router.add_get("/admin/stats", admin_stats_handler)
     runner = aiohttp_web.AppRunner(app)
     await runner.setup()
     site = aiohttp_web.TCPSite(runner, "0.0.0.0", API_PORT)
@@ -18689,6 +19205,51 @@ async def check_expiring_subs():
             logging.info(f"[expiry] отправлено {notified} уведомлений об истечении подписки")
 
 
+
+
+
+@dp.message(Command("ref"))
+async def cmd_ref(message: Message):
+    """Команда /ref — реферальная карточка (Задача 12)."""
+    uid = message.from_user.id
+    bot_info = await bot.get_me()
+    ref_link = f"https://t.me/{bot_info.username}?start=ref{uid}"
+    refs = user_referrals.get(uid, {}).get("refs", [])
+    earned = len(refs) * REF_BONUS_INVITER
+    text = (
+        f"🔗 <b>Реферальная программа</b>\n\n"
+        f"Приглашай друзей и получай бонусные запросы!\n\n"
+        f"👥 Приглашено друзей: <b>{len(refs)}</b>\n"
+        f"🎁 Получено бонусов: <b>{earned} запросов</b>\n"
+        f"⚡ За каждого: <b>+{REF_BONUS_INVITER} запросов</b> тебе + <b>+{REF_BONUS_NEW} запросов</b> другу\n\n"
+        f"🔗 Твоя ссылка:\n"
+        f"<code>{ref_link}</code>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="📤 Поделиться ссылкой",
+            switch_inline_query=f"Присоединяйся к {BOT_NAME}! Получи бонус по моей ссылке: {ref_link}"
+        )],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_home")],
+    ])
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+@dp.message(Command("tts"))
+async def cmd_tts(message: Message):
+    """Включить/выключить голосовые ответы TTS."""
+    uid = message.from_user.id
+    _init_limits(uid)
+    feats = user_features.get(uid, {})
+    cur = feats.get("tts_enabled", False)
+    feats["tts_enabled"] = not cur
+    user_features[uid] = feats
+    state = "✅ включены" if feats["tts_enabled"] else "❌ выключены"
+    await message.answer(
+        f"🔊 Голосовые ответы {state}\n\n"
+        f"Когда вы отправляете голосовое — бот ответит тоже голосом.",
+        parse_mode="HTML"
+    )
+
 async def main():
     global bot
     await init_db()
@@ -18717,6 +19278,8 @@ async def main():
         BotCommand(command="clear",   description="🧹 Очистить память"),
         BotCommand(command="about",   description="ℹ️ О боте"),
         BotCommand(command="info",    description="💡 Помощь и контакты"),
+        BotCommand(command="ref",     description="🔗 Реферальная программа"),
+        BotCommand(command="tts",     description="🔊 Включить/выключить голосовые ответы"),
     ], scope=BotCommandScopeDefault())
     # Устанавливаем кнопку "🤖 ХУЗА AI" слева в поле ввода (MenuButtonWebApp)
     try:
@@ -18732,9 +19295,21 @@ async def main():
     # ── Фоновые задачи ──
     asyncio.create_task(_background_refresh_limits())  # Сброс лимитов каждые 30 мин
     asyncio.create_task(check_expiring_subs())          # Уведомления об истечении подписки
-    # Запускаем API сервер параллельно с ботом
+    asyncio.create_task(_img_gen_worker())              # Задача 6: воркер очереди изображений
+    # ── Запуск: Webhook или long polling (Задача 5) ──────────────────
     await start_api_server()
-    await dp.start_polling(bot)
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+    if WEBHOOK_URL:
+        webhook_path = "/tg_webhook"
+        full_webhook = WEBHOOK_URL.rstrip("/") + webhook_path
+        await bot.set_webhook(full_webhook, drop_pending_updates=True)
+        logging.info(f"✅ Webhook установлен: {full_webhook}")
+        # Держим event loop живым
+        while True:
+            await asyncio.sleep(3600)
+    else:
+        logging.info("ℹ️ WEBHOOK_URL не задан — используется long polling")
+        await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
