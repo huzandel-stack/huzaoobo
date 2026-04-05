@@ -74,6 +74,7 @@ import matplotlib.pyplot as plt
 from matplotlib import font_manager as fm
 from matplotlib.font_manager import FontProperties
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
+from aiogram.fsm.context import FSMContext
 from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonDefault, MenuButtonWebApp
 from aiogram.filters import Command
 from typing import Callable, Dict, Any, Awaitable
@@ -19649,73 +19650,6 @@ async def cb_fav_del(callback: CallbackQuery):
         asyncio.create_task(db_save_user(uid))
         await callback.answer(f"🗑 Удалено: {removed['name'][:20]}")
     await cb_favorites_menu(callback)
-
-
-@dp.callback_query(F.data == "fav_add")
-async def cb_fav_add(callback: CallbackQuery, state: FSMContext):
-    uid  = callback.from_user.id
-    favs = user_favorites.get(uid, [])
-    if len(favs) >= 10:
-        return await callback.answer("❌ Максимум 10 промптов. Сначала удали лишний.", show_alert=True)
-    await callback.answer()
-    await callback.message.answer(
-        f'<tg-emoji emoji-id="{PE["pencil"]}">✏</tg-emoji> <b>Добавить промпт</b>\n\n'
-        f'Отправь текст промпта который хочешь сохранить.\n'
-        f'Потом бот спросит как его назвать.',
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="❌ Отмена", callback_data="menu_favorites")
-        ]])
-    )
-    await state.set_state("fav_waiting_text")
-
-
-@dp.message(lambda msg: True)
-async def fav_receive_text(message: Message, state: FSMContext):
-    current = await state.get_state()
-    if current != "fav_waiting_text":
-        return
-    uid = message.from_user.id
-    fav_text = (message.text or "").strip()
-    if not fav_text:
-        return await message.answer("❌ Пустой текст, попробуй снова.")
-    await state.update_data(fav_text=fav_text)
-    await state.set_state("fav_waiting_name")
-    await message.answer(
-        f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> Теперь напиши <b>название</b> для этого промпта\n'
-        f'(до 30 символов)',
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="❌ Отмена", callback_data="menu_favorites")
-        ]])
-    )
-
-
-@dp.message(lambda msg: True)
-async def fav_receive_name(message: Message, state: FSMContext):
-    current = await state.get_state()
-    if current != "fav_waiting_name":
-        return
-    uid  = message.from_user.id
-    name = (message.text or "").strip()[:30]
-    if not name:
-        return await message.answer("❌ Пустое название, попробуй снова.")
-    data = await state.get_data()
-    fav_text = data.get("fav_text", "")
-    favs = user_favorites.get(uid, [])
-    favs.append({"name": name, "text": fav_text})
-    user_favorites[uid] = favs
-    asyncio.create_task(db_save_user(uid))
-    await state.clear()
-    await message.answer(
-        f'<tg-emoji emoji-id="{PE["check"]}">✅</tg-emoji> <b>Сохранено:</b> {name}',
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="⭐ Мои промпты", callback_data="menu_favorites"),
-            InlineKeyboardButton(text="🏠 Меню", callback_data="back_home"),
-        ]])
-    )
-
 
 # ==================================================================
 # 📊 ГРАФИК АКТИВНОСТИ ПРОФИЛЯ
