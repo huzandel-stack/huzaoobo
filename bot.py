@@ -81,7 +81,8 @@ from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton as AiogramInlineKeyboardButton,
     CallbackQuery, FSInputFile, BufferedInputFile,
     ReplyKeyboardMarkup, KeyboardButton as AiogramKeyboardButton, ReplyKeyboardRemove,
-    WebAppInfo, PreCheckoutQuery, LabeledPrice
+    WebAppInfo, PreCheckoutQuery, LabeledPrice,
+    InlineQuery, InlineQueryResultArticle, InputTextMessageContent
 )
 from aiogram.utils.chat_action import ChatActionSender
 
@@ -997,33 +998,6 @@ ANSWER_MODE_PROMPTS = {
 REPORT_COST = 3  # Цена за генерацию доклада/реферата (продвинутые запросы)
 
 
-# ══════════════════════════════════════════════════════════════
-# 🎁 ПРОБНЫЙ ПЕРИОД ДЛЯ НОВЫХ ПОЛЬЗОВАТЕЛЕЙ
-# ══════════════════════════════════════════════════════════════
-TRIAL_DURATION_HOURS = 24          # 1 сутки
-TRIAL_PRO_REQUESTS   = 30          # AI запросов
-TRIAL_IMG_LIMIT      = 10          # генераций изображений
-TRIAL_MUSIC_LIMIT    = 1           # генераций музыки
-TRIAL_VIDEO_LIMIT    = 1           # генераций видео
-
-# uid -> {"expires": datetime}  — активные триалы
-user_trials: dict = {}
-
-
-def has_active_trial(uid: int) -> bool:
-    """Есть ли активный trial-период."""
-    return False
-
-def _activate_trial(uid: int):
-    """Активирует пробный период для нового пользователя.
-    Вызывается только если uid не в user_trials (загружается из БД при старте).
-    """
-    pass
-
-def _get_lims_with_trial(uid: int) -> dict:
-    """Лимиты с учётом trial-периода."""
-    return _get_lims(uid)
-
 FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Fonts")
 
 
@@ -1181,6 +1155,8 @@ user_referrals    = {}
 REF_BONUS_INVITER = 5
 REF_BONUS_NEW     = 10
 user_history      = {}  # {uid: [{"q","a","model","ts"}]} — последние 10
+user_favorites: dict = {}  # uid -> [{"name": str, "text": str}]
+user_favorites: dict = {}  # uid -> [{"name": str, "text": str}]
 
 # ── Режимы ответа ─────────────────────────────────────────
 ANSWER_MODES = {
@@ -1295,6 +1271,18 @@ LIMITS = {
 }
 
 SUB_PLANS = {
+    "three_days": {
+        "name":        "🔥 3 дня",
+        "price":       29,
+        "days":        3,
+        "label":       "🔥 3 дня — 29 ₽",
+        "description": "3 дня полного доступа",
+        "pro_day":     75,
+        "img_month":   15,
+        "music_month": 1,
+        "video_month": 1,
+        "reset_h":     12,
+    },
     "week": {
         "name":          "⚡ Неделя",
         "price":         39,
@@ -1360,19 +1348,8 @@ SUB_PLANS = {
         "video_month": 3,
         "reset_h":     12,
     },
-    "year": {
-        "name":        "🏆 Год",
-        "price":       800,
-        "days":        365,
-        "label":       "🏆 365 дней — 800 ₽",
-        "description": "365 дней полного доступа (экономия 400 ₽!)",
-        "pro_day":     100,
-        "img_month":   50,
-        "music_month": 5,
-        "video_month": 5,
-        "reset_h":     12,
-    },
 }
+
 
 # uid -> {"expires": datetime, "plan": "week"/"month"}
 user_subscriptions: dict = {}
@@ -1447,9 +1424,9 @@ async def db_load_subscriptions():
 def sub_buy_kb() -> InlineKeyboardMarkup:
     """Клавиатура выбора тарифа при покупке."""
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔥 3 дня — 29 ₽",     callback_data="sub_buy_three_days")],
         [InlineKeyboardButton(text="⚡ 7 дней — 60 ₽",    callback_data="sub_buy_week")],
         [InlineKeyboardButton(text="💎 30 дней — 100 ₽",  callback_data="sub_buy_month")],
-        [InlineKeyboardButton(text="🏆 365 дней — 800 ₽", callback_data="sub_buy_year")],
         [InlineKeyboardButton(text="🏠 Назад",             callback_data="back_home")],
     ])
 
@@ -1650,8 +1627,9 @@ async def init_db():
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS requests INT DEFAULT 0",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS terms_accepted BOOLEAN DEFAULT FALSE",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_expires TIMESTAMPTZ DEFAULT NULL",
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_expires TIMESTAMPTZ DEFAULT NULL",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_plan TEXT DEFAULT ''",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS favorites TEXT DEFAULT '[]'",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS favorites TEXT DEFAULT '[]'",
                 # Музыка и расширенная статистика
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS music_used INT DEFAULT 0",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS music_reset TIMESTAMPTZ DEFAULT NOW()",
@@ -1822,7 +1800,6 @@ async def db_save_user(uid: int, name: str = "", username: str = ""):
         img_reset   = lim.get("img_reset",   msk_now())
         music_reset = lim.get("music_reset", msk_now())
         video_reset = lim.get("video_reset", msk_now())
-        trial_expires = user_trials.get(uid, {}).get("expires", None)
         async with db_pool.acquire() as conn:
             requests_count = user_profiles.get(uid, {}).get("requests", 0)
             await conn.execute("""
@@ -1831,7 +1808,7 @@ async def db_save_user(uid: int, name: str = "", username: str = ""):
                      last_bonus, last_active, features,
                      fast_used, pro_used, img_used, music_used, video_used,
                      fast_reset, pro_reset, img_reset, music_reset, video_reset, requests,
-                     trial_expires)
+                     favorites)
                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW(),$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
                 ON CONFLICT (uid) DO UPDATE SET
                     name=$2, username=$3, model_key=$5,
@@ -1839,11 +1816,11 @@ async def db_save_user(uid: int, name: str = "", username: str = ""):
                     last_bonus=$9, last_active=NOW(), features=$10,
                     fast_used=$11, pro_used=$12, img_used=$13, music_used=$14, video_used=$15,
                     fast_reset=$16, pro_reset=$17, img_reset=$18, music_reset=$19, video_reset=$20,
-                    requests=$21, trial_expires=$22
+                    requests=$21, favorites=$22
             """, uid, name, username, joined, mk, tok, imgs, mem, lb, feats,
                 fast_used, pro_used, img_used, music_used, video_used,
                 fast_reset, pro_reset, img_reset, music_reset, video_reset,
-                requests_count, trial_expires)
+                requests_count, json.dumps(user_favorites.get(uid, []), ensure_ascii=False))
     except Exception as e:
         logging.warning(f"db_save_user: {e}")
 
@@ -1923,18 +1900,18 @@ async def db_load_all_users():
                 "music_reset": _ts(row["music_reset"] if "music_reset" in keys else None),
                 "video_reset": _ts(row["video_reset"] if "video_reset" in keys else None),
             }
-            # Восстанавливаем trial из БД
-            # ВАЖНО: загружаем ЛЮБОЙ trial (даже истёкший) — иначе при перезапуске
-            # trial будет выдан повторно пользователям у которых он уже закончился
+            # Загружаем избранные промпты
             try:
-                te = row["trial_expires"] if "trial_expires" in keys else None
-                if te is not None:
-                    if hasattr(te, "replace"):
-                        te = te.replace(tzinfo=None)
-                    # Всегда сохраняем запись — активный или истёкший
-                    user_trials[uid] = {"expires": te}
+                _favs_raw = row["favorites"] if "favorites" in row.keys() else "[]"
+                user_favorites[uid] = json.loads(_favs_raw or "[]")
             except Exception:
-                pass
+                user_favorites[uid] = []
+            # Загружаем избранные промпты
+            try:
+                _favs_raw = row["favorites"] if "favorites" in row.keys() else "[]"
+                user_favorites[uid] = json.loads(_favs_raw or "[]")
+            except Exception:
+                user_favorites[uid] = []
             # Кэшируем факт принятия соглашения
             try:
                 keys = row.keys() if hasattr(row, "keys") else []
@@ -4144,6 +4121,7 @@ def home_kb(uid: int) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🧹 Очистить память",   callback_data="clear_memory"),
+            InlineKeyboardButton(text="⭐ Избранное",          callback_data="menu_favorites"),
         ],
         [
             InlineKeyboardButton(text="💬 Поддержка",         callback_data="menu_support"),
@@ -4691,7 +4669,7 @@ async def cmd_start(message: Message):
             pass  # некорректный реф-код — просто игнорируем
 
     # Trial для новых
-    _is_brand_new = uid not in user_trials and not has_active_sub(uid)
+    _is_brand_new = not has_active_sub(uid)
     # Trial disabled
 
     # Сохраняем в БД
@@ -11719,12 +11697,28 @@ async def _show_profile(msg_or_cb, uid: int):
     ])
     if is_cb:
         try:
-            await msg_or_cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            chart_bytes = await _generate_activity_chart(uid)
+            if chart_bytes:
+                from aiogram.types import BufferedInputFile as _BIF
+                chart_file = _BIF(chart_bytes, filename="activity.png")
+                try:
+                    await msg_or_cb.message.delete()
+                except Exception:
+                    pass
+                await msg_or_cb.message.answer_photo(chart_file, caption=text, parse_mode="HTML", reply_markup=kb)
+            else:
+                await msg_or_cb.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
         except Exception:
             await msg_or_cb.message.answer(text, parse_mode="HTML", reply_markup=kb)
         await msg_or_cb.answer()
     else:
-        await msg_or_cb.answer(text, parse_mode="HTML", reply_markup=kb)
+        chart_bytes = await _generate_activity_chart(uid)
+        if chart_bytes:
+            from aiogram.types import BufferedInputFile as _BIF
+            chart_file = _BIF(chart_bytes, filename="activity.png")
+            await msg_or_cb.answer_photo(chart_file, caption=text, parse_mode="HTML", reply_markup=kb)
+        else:
+            await msg_or_cb.answer(text, parse_mode="HTML", reply_markup=kb)
 
 @dp.message(F.text.in_({"ℹ️ О боте", "О боте"}))
 async def rb_about(message: Message):
@@ -12836,6 +12830,7 @@ async def show_admin_panel(msg_or_cb):
         [InlineKeyboardButton(text="⚙️ Дополнительно",  callback_data="admin_extra")],
         [InlineKeyboardButton(text="🔌 Сервисы вкл/выкл", callback_data="admin_services")],
         [InlineKeyboardButton(text="🗑 Сброс памяти",   callback_data="admin_reset_memory")],
+        [InlineKeyboardButton(text="🔄 Сброс лимитов юзера", callback_data="admin_reset_limits")],
         [InlineKeyboardButton(text="🏠 Главная",         callback_data="back_home")],
     ])
     text = (
@@ -19184,14 +19179,22 @@ async def check_expiring_subs():
                 try:
                     await bot.send_message(
                         _uid,
-                        f"⏰ <b>Подписка заканчивается!</b>\n\n"
-                        f"💎 Тариф: <b>{plan_name}</b>\n"
-                        f"📅 Осталось: <b>{days_left} дн.</b>\n\n"
-                        f"Продли подписку чтобы не потерять доступ к возможностям бота.",
+                        premium_html(
+                            f'⏰ <b>Подписка заканчивается!</b>\n\n'
+                            f'💎 Тариф: <b>{plan_name}</b>\n'
+                            f'📅 Осталось: <b>{days_left} дн.</b>\n\n'
+                            f'Продли подписку чтобы не потерять доступ к возможностям бота.'
+                        ),
                         parse_mode="HTML",
                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                            [InlineKeyboardButton(text="💎 Продлить подписку", callback_data="sub_menu")],
-                            [InlineKeyboardButton(text="🏠 Главное меню",      callback_data="back_home")],
+                            [InlineKeyboardButton(
+                                text="Продлить подписку",
+                                callback_data="sub_menu",
+                            )],
+                            [InlineKeyboardButton(
+                                text="Главное меню",
+                                callback_data="back_home",
+                            )],
                         ])
                     )
                     # Ставим флаг чтобы не слать повторно
@@ -19216,21 +19219,24 @@ async def cmd_ref(message: Message):
     ref_link = f"https://t.me/{bot_info.username}?start=ref{uid}"
     refs = user_referrals.get(uid, {}).get("refs", [])
     earned = len(refs) * REF_BONUS_INVITER
-    text = (
-        f"🔗 <b>Реферальная программа</b>\n\n"
-        f"Приглашай друзей и получай бонусные запросы!\n\n"
-        f"👥 Приглашено друзей: <b>{len(refs)}</b>\n"
-        f"🎁 Получено бонусов: <b>{earned} запросов</b>\n"
-        f"⚡ За каждого: <b>+{REF_BONUS_INVITER} запросов</b> тебе + <b>+{REF_BONUS_NEW} запросов</b> другу\n\n"
-        f"🔗 Твоя ссылка:\n"
-        f"<code>{ref_link}</code>"
+    text = premium_html(
+        f'🔗 <b>Реферальная программа</b>\n\n'
+        f'Приглашай друзей и получай бонусные запросы!\n\n'
+        f'👥 Приглашено друзей: <b>{len(refs)}</b>\n'
+        f'🎁 Получено бонусов: <b>{earned} запросов</b>\n'
+        f'⚡ За каждого: <b>+{REF_BONUS_INVITER} запросов</b> тебе + <b>+{REF_BONUS_NEW} запросов</b> другу\n\n'
+        f'🔗 Твоя ссылка:\n'
+        f'<code>{ref_link}</code>'
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text="📤 Поделиться ссылкой",
-            switch_inline_query=f"Присоединяйся к {BOT_NAME}! Получи бонус по моей ссылке: {ref_link}"
+            text="Поделиться ссылкой",
+            switch_inline_query=f"Присоединяйся к {BOT_NAME}! Получи бонус по моей ссылке: {ref_link}",
         )],
-        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_home")],
+        [InlineKeyboardButton(
+            text="Главное меню",
+            callback_data="back_home",
+        )],
     ])
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
@@ -19249,6 +19255,697 @@ async def cmd_tts(message: Message):
         f"Когда вы отправляете голосовое — бот ответит тоже голосом.",
         parse_mode="HTML"
     )
+
+
+# ==================================================================
+# ⭐ ИЗБРАННЫЕ ПРОМПТЫ
+# ==================================================================
+
+def get_favorites_kb(uid: int) -> InlineKeyboardMarkup:
+    favs = user_favorites.get(uid, [])
+    rows = []
+    for i, fav in enumerate(favs):
+        rows.append([InlineKeyboardButton(
+            text=fav["name"][:30],
+            callback_data=f"fav_use_{i}"
+        )])
+    rows.append([
+        InlineKeyboardButton(text="➕ Добавить текущий промпт", callback_data="fav_add"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="◁ Назад", callback_data="back_home"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data == "menu_favorites")
+async def cb_favorites_menu(callback: CallbackQuery):
+    uid  = callback.from_user.id
+    favs = user_favorites.get(uid, [])
+    if favs:
+        count_str = f"У тебя <b>{len(favs)}/10</b> сохранённых промптов."
+    else:
+        count_str = "У тебя пока нет сохранённых промптов."
+    text = (
+        f'<tg-emoji emoji-id="{PE["tag"]}">🏷</tg-emoji> <b>Избранные промпты</b>\n\n'
+        f'{count_str}\n\n'
+        f'Нажми на промпт чтобы отправить его боту.'
+    )
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=get_favorites_kb(uid))
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=get_favorites_kb(uid))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("fav_use_"))
+async def cb_fav_use(callback: CallbackQuery):
+    uid = callback.from_user.id
+    idx = int(callback.data.replace("fav_use_", ""))
+    favs = user_favorites.get(uid, [])
+    if idx >= len(favs):
+        return await callback.answer("❌ Промпт не найден", show_alert=True)
+    fav = favs[idx]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить боту", callback_data=f"fav_send_{idx}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"fav_del_{idx}")],
+        [InlineKeyboardButton(text="◁ Назад", callback_data="menu_favorites")],
+    ])
+    text = (
+        f'<tg-emoji emoji-id="{PE["pencil"]}">✏</tg-emoji> <b>{fav["name"]}</b>\n\n'
+        f'<code>{fav["text"][:500]}</code>'
+    )
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("fav_send_"))
+async def cb_fav_send(callback: CallbackQuery):
+    uid = callback.from_user.id
+    idx = int(callback.data.replace("fav_send_", ""))
+    favs = user_favorites.get(uid, [])
+    if idx >= len(favs):
+        return await callback.answer("❌ Промпт не найден", show_alert=True)
+    fav_text = favs[idx]["text"]
+    await callback.answer("✅ Отправляю...")
+    await callback.message.answer(
+        f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> <i>Промпт отправлен:</i>\n<code>{fav_text[:200]}</code>',
+        parse_mode="HTML"
+    )
+    _init_limits(uid)
+    mk = resolve_model_key(uid, fav_text)
+    _ok, _ = can_send(uid, mk)
+    if not _ok:
+        await callback.message.answer("🚫 Лимит исчерпан. Попробуй позже.", parse_mode="HTML")
+        return
+    if uid not in user_memory:
+        user_memory[uid] = deque(maxlen=20)
+    user_memory[uid].append({"role": "user", "content": fav_text})
+    msgs = [{"role": "user", "content": fav_text}]
+    think = await callback.message.answer(
+        f'<tg-emoji emoji-id="{PE["loading"]}">🔄</tg-emoji> <i>Думаю...</i>', parse_mode="HTML"
+    )
+    try:
+        ans = await call_chat(msgs, mk)
+        user_memory[uid].append({"role": "assistant", "content": ans})
+        spend_limit(uid, mk)
+        last_responses[uid] = {"q": fav_text, "a": ans, "model_label": MODELS.get(mk, {}).get("label", "ИИ"), "model_key": mk}
+        await think.delete()
+        html_ans = md_to_html(ans)
+        await callback.message.answer(html_ans, parse_mode="HTML", reply_markup=save_kb(uid))
+    except Exception as e:
+        await think.delete()
+        await callback.message.answer(f"❌ Ошибка: {str(e)[:200]}")
+
+
+@dp.callback_query(F.data.startswith("fav_del_"))
+async def cb_fav_del(callback: CallbackQuery):
+    uid = callback.from_user.id
+    idx = int(callback.data.replace("fav_del_", ""))
+    favs = user_favorites.get(uid, [])
+    if idx < len(favs):
+        removed = favs.pop(idx)
+        user_favorites[uid] = favs
+        asyncio.create_task(db_save_user(uid))
+        await callback.answer(f"🗑 Удалено: {removed['name'][:20]}")
+    await cb_favorites_menu(callback)
+
+
+@dp.callback_query(F.data == "fav_add")
+async def cb_fav_add(callback: CallbackQuery, state: FSMContext):
+    uid  = callback.from_user.id
+    favs = user_favorites.get(uid, [])
+    if len(favs) >= 10:
+        return await callback.answer("❌ Максимум 10 промптов. Сначала удали лишний.", show_alert=True)
+    await callback.answer()
+    await callback.message.answer(
+        f'<tg-emoji emoji-id="{PE["pencil"]}">✏</tg-emoji> <b>Добавить промпт</b>\n\n'
+        f'Отправь текст промпта который хочешь сохранить.\n'
+        f'Потом бот спросит как его назвать.',
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="menu_favorites")
+        ]])
+    )
+    await state.set_state("fav_waiting_text")
+
+
+@dp.message(lambda msg: True)
+async def fav_receive_text(message: Message, state: FSMContext):
+    current = await state.get_state()
+    if current != "fav_waiting_text":
+        return
+    uid = message.from_user.id
+    fav_text = (message.text or "").strip()
+    if not fav_text:
+        return await message.answer("❌ Пустой текст, попробуй снова.")
+    await state.update_data(fav_text=fav_text)
+    await state.set_state("fav_waiting_name")
+    await message.answer(
+        f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> Теперь напиши <b>название</b> для этого промпта\n'
+        f'(до 30 символов)',
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="menu_favorites")
+        ]])
+    )
+
+
+@dp.message(lambda msg: True)
+async def fav_receive_name(message: Message, state: FSMContext):
+    current = await state.get_state()
+    if current != "fav_waiting_name":
+        return
+    uid  = message.from_user.id
+    name = (message.text or "").strip()[:30]
+    if not name:
+        return await message.answer("❌ Пустое название, попробуй снова.")
+    data = await state.get_data()
+    fav_text = data.get("fav_text", "")
+    favs = user_favorites.get(uid, [])
+    favs.append({"name": name, "text": fav_text})
+    user_favorites[uid] = favs
+    asyncio.create_task(db_save_user(uid))
+    await state.clear()
+    await message.answer(
+        f'<tg-emoji emoji-id="{PE["check"]}">✅</tg-emoji> <b>Сохранено:</b> {name}',
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⭐ Мои промпты", callback_data="menu_favorites"),
+            InlineKeyboardButton(text="🏠 Меню", callback_data="back_home"),
+        ]])
+    )
+
+
+# ==================================================================
+# 🔍 INLINE-РЕЖИМ — вопросы боту из любого чата
+# ==================================================================
+
+@dp.inline_query()
+async def inline_query_handler(inline_query: InlineQuery):
+    """Обработка inline-запросов @bot текст"""
+    uid   = inline_query.from_user.id
+    query = (inline_query.query or "").strip()
+
+    if not query:
+        results = [
+            InlineQueryResultArticle(
+                id="hint",
+                title=f"Задай вопрос {BOT_NAME}",
+                description="Напиши вопрос после @username бота",
+                input_message_content=InputTextMessageContent(
+                    message_text=f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> Напиши свой вопрос после @username бота',
+                    parse_mode="HTML"
+                ),
+            )
+        ]
+        await inline_query.answer(results, cache_time=10, is_personal=True)
+        return
+
+    bot_info = await bot.get_me()
+    deep_link = f"https://t.me/{bot_info.username}?start=q_{query[:50].replace(' ', '_')}"
+
+    answer_text = ""
+    if len(query.split()) <= 4:
+        try:
+            _msgs = [
+                {"role": "system", "content": f"Ты — {BOT_NAME}. Отвечай ОЧЕНЬ кратко — 1-2 предложения max."},
+                {"role": "user", "content": query}
+            ]
+            answer_text = await asyncio.wait_for(
+                call_chat(_msgs, "claude_haiku", max_tokens=80),
+                timeout=3.5
+            )
+        except Exception:
+            pass
+
+    if answer_text:
+        preview = answer_text[:100] + ("..." if len(answer_text) > 100 else "")
+        full_msg = (
+            f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>{BOT_NAME}</b>\n\n'
+            f'<b>Вопрос:</b> {query}\n\n'
+            f'<b>Ответ:</b> {answer_text}\n\n'
+            f'<i>Открой бота для полного ответа и продолжения диалога 👇</i>'
+        )
+        results = [
+            InlineQueryResultArticle(
+                id=f"answer_{hash(query) % 100000}",
+                title=f"💬 {query[:60]}",
+                description=preview,
+                input_message_content=InputTextMessageContent(
+                    message_text=full_msg,
+                    parse_mode="HTML"
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text=f"Открыть {BOT_NAME}",
+                        url=deep_link,
+                    )
+                ]])
+            )
+        ]
+    else:
+        full_msg = (
+            f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>{BOT_NAME}</b>\n\n'
+            f'<b>Вопрос:</b> {query}\n\n'
+            f'<i>Нажми кнопку ниже чтобы получить ответ в боте</i>'
+        )
+        results = [
+            InlineQueryResultArticle(
+                id=f"ask_{hash(query) % 100000}",
+                title=f"🤖 Спросить: {query[:50]}",
+                description=f"Получить ответ от {BOT_NAME}",
+                input_message_content=InputTextMessageContent(
+                    message_text=full_msg,
+                    parse_mode="HTML"
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text=f"Открыть {BOT_NAME}",
+                        url=deep_link,
+                    )
+                ]])
+            )
+        ]
+
+    await inline_query.answer(results, cache_time=30, is_personal=True)
+
+
+# ==================================================================
+# ⭐ ИЗБРАННЫЕ ПРОМПТЫ
+# ==================================================================
+
+def get_favorites_kb(uid: int) -> InlineKeyboardMarkup:
+    favs = user_favorites.get(uid, [])
+    rows = []
+    for i, fav in enumerate(favs):
+        rows.append([InlineKeyboardButton(
+            text=fav["name"][:30],
+            callback_data=f"fav_use_{i}"
+        )])
+    rows.append([
+        InlineKeyboardButton(text="➕ Добавить текущий промпт", callback_data="fav_add"),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="◁ Назад", callback_data="back_home"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data == "menu_favorites")
+async def cb_favorites_menu(callback: CallbackQuery):
+    uid  = callback.from_user.id
+    favs = user_favorites.get(uid, [])
+    if favs:
+        count_str = f"У тебя <b>{len(favs)}/10</b> сохранённых промптов."
+    else:
+        count_str = "У тебя пока нет сохранённых промптов."
+    text = (
+        f'<tg-emoji emoji-id="{PE["tag"]}">🏷</tg-emoji> <b>Избранные промпты</b>\n\n'
+        f'{count_str}\n\n'
+        f'Нажми на промпт чтобы отправить его боту.'
+    )
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=get_favorites_kb(uid))
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=get_favorites_kb(uid))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("fav_use_"))
+async def cb_fav_use(callback: CallbackQuery):
+    uid = callback.from_user.id
+    idx = int(callback.data.replace("fav_use_", ""))
+    favs = user_favorites.get(uid, [])
+    if idx >= len(favs):
+        return await callback.answer("❌ Промпт не найден", show_alert=True)
+    fav = favs[idx]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Отправить боту", callback_data=f"fav_send_{idx}")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"fav_del_{idx}")],
+        [InlineKeyboardButton(text="◁ Назад", callback_data="menu_favorites")],
+    ])
+    text = (
+        f'<tg-emoji emoji-id="{PE["pencil"]}">✏</tg-emoji> <b>{fav["name"]}</b>\n\n'
+        f'<code>{fav["text"][:500]}</code>'
+    )
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("fav_send_"))
+async def cb_fav_send(callback: CallbackQuery):
+    uid = callback.from_user.id
+    idx = int(callback.data.replace("fav_send_", ""))
+    favs = user_favorites.get(uid, [])
+    if idx >= len(favs):
+        return await callback.answer("❌ Промпт не найден", show_alert=True)
+    fav_text = favs[idx]["text"]
+    await callback.answer("✅ Отправляю...")
+    await callback.message.answer(
+        f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> <i>Промпт отправлен:</i>\n<code>{fav_text[:200]}</code>',
+        parse_mode="HTML"
+    )
+    _init_limits(uid)
+    mk = resolve_model_key(uid, fav_text)
+    _ok, _ = can_send(uid, mk)
+    if not _ok:
+        await callback.message.answer("🚫 Лимит исчерпан. Попробуй позже.", parse_mode="HTML")
+        return
+    if uid not in user_memory:
+        user_memory[uid] = deque(maxlen=20)
+    user_memory[uid].append({"role": "user", "content": fav_text})
+    msgs = [{"role": "user", "content": fav_text}]
+    think = await callback.message.answer(
+        f'<tg-emoji emoji-id="{PE["loading"]}">🔄</tg-emoji> <i>Думаю...</i>', parse_mode="HTML"
+    )
+    try:
+        ans = await call_chat(msgs, mk)
+        user_memory[uid].append({"role": "assistant", "content": ans})
+        spend_limit(uid, mk)
+        last_responses[uid] = {"q": fav_text, "a": ans, "model_label": MODELS.get(mk, {}).get("label", "ИИ"), "model_key": mk}
+        await think.delete()
+        html_ans = md_to_html(ans)
+        await callback.message.answer(html_ans, parse_mode="HTML", reply_markup=save_kb(uid))
+    except Exception as e:
+        await think.delete()
+        await callback.message.answer(f"❌ Ошибка: {str(e)[:200]}")
+
+
+@dp.callback_query(F.data.startswith("fav_del_"))
+async def cb_fav_del(callback: CallbackQuery):
+    uid = callback.from_user.id
+    idx = int(callback.data.replace("fav_del_", ""))
+    favs = user_favorites.get(uid, [])
+    if idx < len(favs):
+        removed = favs.pop(idx)
+        user_favorites[uid] = favs
+        asyncio.create_task(db_save_user(uid))
+        await callback.answer(f"🗑 Удалено: {removed['name'][:20]}")
+    await cb_favorites_menu(callback)
+
+
+@dp.callback_query(F.data == "fav_add")
+async def cb_fav_add(callback: CallbackQuery, state: FSMContext):
+    uid  = callback.from_user.id
+    favs = user_favorites.get(uid, [])
+    if len(favs) >= 10:
+        return await callback.answer("❌ Максимум 10 промптов. Сначала удали лишний.", show_alert=True)
+    await callback.answer()
+    await callback.message.answer(
+        f'<tg-emoji emoji-id="{PE["pencil"]}">✏</tg-emoji> <b>Добавить промпт</b>\n\n'
+        f'Отправь текст промпта который хочешь сохранить.\n'
+        f'Потом бот спросит как его назвать.',
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="menu_favorites")
+        ]])
+    )
+    await state.set_state("fav_waiting_text")
+
+
+@dp.message(lambda msg: True)
+async def fav_receive_text(message: Message, state: FSMContext):
+    current = await state.get_state()
+    if current != "fav_waiting_text":
+        return
+    uid = message.from_user.id
+    fav_text = (message.text or "").strip()
+    if not fav_text:
+        return await message.answer("❌ Пустой текст, попробуй снова.")
+    await state.update_data(fav_text=fav_text)
+    await state.set_state("fav_waiting_name")
+    await message.answer(
+        f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> Теперь напиши <b>название</b> для этого промпта\n'
+        f'(до 30 символов)',
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="❌ Отмена", callback_data="menu_favorites")
+        ]])
+    )
+
+
+@dp.message(lambda msg: True)
+async def fav_receive_name(message: Message, state: FSMContext):
+    current = await state.get_state()
+    if current != "fav_waiting_name":
+        return
+    uid  = message.from_user.id
+    name = (message.text or "").strip()[:30]
+    if not name:
+        return await message.answer("❌ Пустое название, попробуй снова.")
+    data = await state.get_data()
+    fav_text = data.get("fav_text", "")
+    favs = user_favorites.get(uid, [])
+    favs.append({"name": name, "text": fav_text})
+    user_favorites[uid] = favs
+    asyncio.create_task(db_save_user(uid))
+    await state.clear()
+    await message.answer(
+        f'<tg-emoji emoji-id="{PE["check"]}">✅</tg-emoji> <b>Сохранено:</b> {name}',
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="⭐ Мои промпты", callback_data="menu_favorites"),
+            InlineKeyboardButton(text="🏠 Меню", callback_data="back_home"),
+        ]])
+    )
+
+
+# ==================================================================
+# 📊 ГРАФИК АКТИВНОСТИ ПРОФИЛЯ
+# ==================================================================
+
+async def _generate_activity_chart(uid: int):
+    """Генерирует мини-график активности за 7 дней через matplotlib."""
+    try:
+        import datetime
+        hist = list(user_history.get(uid, []))
+
+        today = msk_now().date()
+        days  = [(today - datetime.timedelta(days=i)) for i in range(6, -1, -1)]
+
+        counts = {d: 0 for d in days}
+        for entry in hist:
+            try:
+                ts_raw = entry.get("ts", "")
+                if ts_raw:
+                    ts = datetime.datetime.fromisoformat(ts_raw).date()
+                    if ts in counts:
+                        counts[ts] += 1
+            except Exception:
+                pass
+
+        if sum(counts.values()) == 0:
+            total = user_profiles.get(uid, {}).get("requests", 0)
+            if total > 0:
+                counts[today] = min(total, 25)
+
+        labels = [d.strftime("%d.%m") for d in days]
+        values = [counts[d] for d in days]
+
+        fig, ax = plt.subplots(figsize=(6, 2.2))
+        fig.patch.set_facecolor("#1a1a2e")
+        ax.set_facecolor("#16213e")
+
+        ax.bar(labels, values, color="#7f77dd", width=0.6, zorder=3)
+        ax.set_ylim(0, max(max(values) + 2, 5))
+        ax.tick_params(axis="x", colors="white", labelsize=8)
+        ax.tick_params(axis="y", colors="white", labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_edgecolor("#333")
+        ax.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax.grid(axis="y", color="#ffffff22", linewidth=0.5, zorder=0)
+        ax.set_title("Запросов за 7 дней", color="white", fontsize=9, pad=4)
+
+        for i, v in enumerate(values):
+            if v > 0:
+                ax.text(i, v + 0.1, str(v), ha="center", va="bottom",
+                        color="white", fontsize=7, fontweight="bold")
+
+        plt.tight_layout(pad=0.5)
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", dpi=120, facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        logging.warning(f"_generate_activity_chart: {e}")
+        return None
+
+
+# ==================================================================
+# 🔄 АДМИН: СБРОС ЛИМИТОВ ПОЛЬЗОВАТЕЛЯ
+# ==================================================================
+
+@dp.callback_query(F.data == "admin_reset_limits")
+async def admin_reset_limits_menu(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("❌ Нет доступа", show_alert=True)
+    await callback.answer()
+    await callback.message.edit_text(
+        premium_html(
+            '🔄 <b>Сброс лимитов пользователя</b>\n\n'
+            'Отправь UID пользователя (число).\n'
+            'Найти UID: пользователь пишет /start — в логах виден uid.'
+        ),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="◁ Назад", callback_data="menu_admin")
+        ]])
+    )
+    await state.set_state("admin_waiting_uid_for_reset")
+
+
+@dp.message(lambda msg: msg.from_user.id in ADMIN_IDS)
+async def admin_receive_uid_for_reset(message: Message, state: FSMContext):
+    current = await state.get_state()
+    if current != "admin_waiting_uid_for_reset":
+        return
+    uid_str = (message.text or "").strip()
+    if not uid_str.lstrip("-").isdigit():
+        return await message.answer("❌ Некорректный UID. Введи число.")
+    target_uid = int(uid_str)
+    await state.clear()
+
+    if target_uid not in user_limits:
+        return await message.answer(
+            f"❌ Пользователь <code>{target_uid}</code> не найден в памяти.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="◁ Назад", callback_data="admin_reset_limits")
+            ]])
+        )
+
+    _init_limits(target_uid)
+    lim = user_limits[target_uid]
+    now = msk_now()
+    lim["pro_used"]   = 0
+    lim["img_used"]   = 0
+    lim["music_used"] = 0
+    lim["video_used"] = 0
+    lim["pro_reset"]   = now
+    lim["img_reset"]   = now
+    lim["music_reset"] = now
+    lim["video_reset"] = now
+    user_limits[target_uid] = lim
+    asyncio.create_task(db_save_user(target_uid))
+
+    prof = user_profiles.get(target_uid, {})
+    name = prof.get("name", "Неизвестно")
+
+    await message.answer(
+        premium_html(
+            f'✅ <b>Лимиты сброшены!</b>\n\n'
+            f'👤 Пользователь: <b>{name}</b>\n'
+            f'🔗 UID: <code>{target_uid}</code>\n\n'
+            f'Все счётчики (запросы, фото, музыка, видео) обнулены.'
+        ),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔄 Сбросить ещё", callback_data="admin_reset_limits"),
+            InlineKeyboardButton(text="◁ Меню", callback_data="menu_admin"),
+        ]])
+    )
+
+# ==================================================================
+# 🔍 INLINE-РЕЖИМ — вопросы боту из любого чата
+# ==================================================================
+
+@dp.inline_query()
+async def inline_query_handler(inline_query: InlineQuery):
+    """Обработка inline-запросов @bot текст"""
+    uid   = inline_query.from_user.id
+    query = (inline_query.query or "").strip()
+
+    if not query:
+        results = [
+            InlineQueryResultArticle(
+                id="hint",
+                title=f"Задай вопрос {BOT_NAME}",
+                description="Напиши вопрос после @username бота",
+                input_message_content=InputTextMessageContent(
+                    message_text=f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> Напиши свой вопрос после @username бота',
+                    parse_mode="HTML"
+                ),
+            )
+        ]
+        await inline_query.answer(results, cache_time=10, is_personal=True)
+        return
+
+    bot_info = await bot.get_me()
+    deep_link = f"https://t.me/{bot_info.username}?start=q_{query[:50].replace(' ', '_')}"
+
+    answer_text = ""
+    if len(query.split()) <= 4:
+        try:
+            _msgs = [
+                {"role": "system", "content": f"Ты — {BOT_NAME}. Отвечай ОЧЕНЬ кратко — 1-2 предложения max."},
+                {"role": "user", "content": query}
+            ]
+            answer_text = await asyncio.wait_for(
+                call_chat(_msgs, "claude_haiku", max_tokens=80),
+                timeout=3.5
+            )
+        except Exception:
+            pass
+
+    if answer_text:
+        preview = answer_text[:100] + ("..." if len(answer_text) > 100 else "")
+        full_msg = (
+            f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>{BOT_NAME}</b>\n\n'
+            f'<b>Вопрос:</b> {query}\n\n'
+            f'<b>Ответ:</b> {answer_text}\n\n'
+            f'<i>Открой бота для полного ответа и продолжения диалога 👇</i>'
+        )
+        results = [
+            InlineQueryResultArticle(
+                id=f"answer_{hash(query) % 100000}",
+                title=f"💬 {query[:60]}",
+                description=preview,
+                input_message_content=InputTextMessageContent(
+                    message_text=full_msg,
+                    parse_mode="HTML"
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text=f"Открыть {BOT_NAME}",
+                        url=deep_link
+                    )
+                ]])
+            )
+        ]
+    else:
+        full_msg = (
+            f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>{BOT_NAME}</b>\n\n'
+            f'<b>Вопрос:</b> {query}\n\n'
+            f'<i>Нажми кнопку ниже чтобы получить ответ в боте</i>'
+        )
+        results = [
+            InlineQueryResultArticle(
+                id=f"ask_{hash(query) % 100000}",
+                title=f"🤖 Спросить: {query[:50]}",
+                description=f"Получить ответ от {BOT_NAME}",
+                input_message_content=InputTextMessageContent(
+                    message_text=full_msg,
+                    parse_mode="HTML"
+                ),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text=f"Открыть {BOT_NAME}",
+                        url=deep_link
+                    )
+                ]])
+            )
+        ]
+
+    await inline_query.answer(results, cache_time=30, is_personal=True)
+
 
 async def main():
     global bot
