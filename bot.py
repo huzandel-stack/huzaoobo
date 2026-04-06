@@ -1488,7 +1488,7 @@ class TermsMiddleware(BaseMiddleware):
                 return await handler(event, data)
 
             # /start и /info всегда пропускаем
-            if text.startswith("/start") or text.startswith("/info"):
+            if text.startswith("/start") or text.startswith("/info") or text.startswith("/ref"):
                 return await handler(event, data)
 
             if await _has_accepted(uid):
@@ -4005,6 +4005,69 @@ async def generate_image(prompt: str, img_model_key: str, ratio: str = "1:1",
 # ==================================================================
 
 
+
+# ------------------------------------------------------------------
+# 🔧 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ МЕНЮ МОДЕЛЕЙ (raw Telegram API)
+# ------------------------------------------------------------------
+
+def _get_model_label(uid: int) -> str:
+    """Возвращает человекочитаемый лейбл текущей модели пользователя."""
+    mk = get_model_key(uid)
+    if mk == "auto":
+        return "⚡ Авто"
+    return MODELS.get(mk, {}).get("label", mk)
+
+
+def _kb_to_json(kb: InlineKeyboardMarkup) -> dict:
+    """Конвертирует aiogram InlineKeyboardMarkup в raw-dict для Telegram Bot API."""
+    rows = []
+    for row in kb.inline_keyboard:
+        buttons = []
+        for btn in row:
+            b: dict = {"text": btn.text}
+            if btn.callback_data:
+                b["callback_data"] = btn.callback_data
+            elif btn.url:
+                b["url"] = btn.url
+            buttons.append(b)
+        rows.append(buttons)
+    return {"inline_keyboard": rows}
+
+
+def _ai_menu_json(uid: int) -> dict:
+    """Raw-dict главного меню выбора категории модели."""
+    return _kb_to_json(ai_menu_kb(uid))
+
+
+def _model_sub_menu_text(uid: int) -> str:
+    """Текст для главного меню выбора модели."""
+    label = _get_model_label(uid)
+    has_sub = has_active_sub(uid)
+    sub_str = "💎 Подписка активна" if has_sub else "🆓 Без подписки"
+    return (
+        f"🤖 <b>Выбор нейросети</b>\n\n"
+        f"✅ Текущая модель: <code>{label}</code>\n"
+        f"◈ {sub_str}\n\n"
+        f"Выбери категорию:"
+    )
+
+
+def _modelcat_free_json(uid: int) -> dict:
+    """Raw-dict подменю бесплатных моделей."""
+    return _kb_to_json(_modelcat_free_kb(uid))
+
+
+def _modelcat_paid_json(uid: int) -> dict:
+    """Raw-dict подменю платных моделей."""
+    return _kb_to_json(_modelcat_paid_kb(uid))
+
+
+def _modelcat_web_json(uid: int) -> dict:
+    """Raw-dict подменю веб-моделей."""
+    return _kb_to_json(_modelcat_web_kb(uid))
+
+
+# ------------------------------------------------------------------
 
 async def _tg_send_model_menu(chat_id: int, uid: int) -> None:
     """Отправить главное меню выбора модели напрямую через Telegram API (с цветными кнопками)."""
@@ -19134,7 +19197,7 @@ async def cb_fav_add(callback: CallbackQuery, state: FSMContext):
     await state.set_state("fav_waiting_text")
 
 
-@dp.message(lambda msg: True)
+@dp.message(F.text, flags={"priority": 10})
 async def fav_receive_text(message: Message, state: FSMContext):
     current = await state.get_state()
     if current != "fav_waiting_text":
@@ -19155,7 +19218,7 @@ async def fav_receive_text(message: Message, state: FSMContext):
     )
 
 
-@dp.message(lambda msg: True)
+@dp.message(F.text, flags={"priority": 10})
 async def fav_receive_name(message: Message, state: FSMContext):
     current = await state.get_state()
     if current != "fav_waiting_name":
