@@ -408,7 +408,6 @@ def _require_env(key: str) -> str:
     return val
 
 TELEGRAM_TOKEN = _require_env("TELEGRAM_TOKEN")
-IO_KEY         = _require_env("IO_KEY")
 SQ_KEY         = _require_env("SQ_KEY")
 
 # ── ЮKassa (Telegram Payments) ────────────────────────────────────
@@ -420,9 +419,6 @@ PLATEGA_MERCHANT_ID = os.getenv("PLATEGA_MERCHANT_ID", "1db27759-f7bd-4067-a43d-
 PLATEGA_SECRET      = os.getenv("PLATEGA_SECRET", "zeSCSorfEl8qtEUjtuEHzjG6xsIOt9e8KzB4wDcuZcqmw4vr9CfaP0lktpSyP60ze2N4FD8QhB8zBaCzfmL4AhUC11lXd5hc6vSE")       # X-Secret из ЛК Platega
 PLATEGA_API_URL     = "https://api.platega.io/v1/payment"
 
-IO_CHAT      = "https://api.intelligence.io.solutions/api/v1/chat/completions"
-IO_AUDIO     = "https://api.intelligence.io.solutions/api/v1/audio/transcriptions"
-IO_WHISPER   = "deepdml/faster-whisper-large-v3-turbo-ct2"
 
 SQ_BASE      = "https://api.onlysq.ru/ai/openai"
 SQ_CHAT      = SQ_BASE + "/chat/completions"
@@ -528,11 +524,6 @@ MUSIC_MODELS = {
         "label": "🎵 Suno v5",
         "desc":  "Лучшее качество, пение, полноценные треки",
         "emoji": "🎵",
-    },
-    "elevenlabs": {
-        "label": "🎸 ElevenLabs Music",
-        "desc":  "Инструментальная и вокальная музыка ElevenLabs",
-        "emoji": "🎸",
     },
 }
 MUSIC_MODEL_DEFAULT = "suno"
@@ -649,43 +640,6 @@ async def generate_music_pollinations(prompt: str, lang: str = "en") -> bytes:
     raise RuntimeError(f"Pollinations Suno: все ключи исчерпаны. Последняя ошибка: {last_err}")
 
 
-async def generate_music_elevenlabs(prompt: str, lang: str = "en") -> bytes:
-    """
-    Генерация музыки через Pollinations — модель ElevenLabs Music (elevenmusic).
-    GET https://gen.pollinations.ai/audio/{prompt}?model=elevenmusic
-    Умно переключает ключи при 429/квоте.
-    """
-    import urllib.parse as _up
-    encoded = _up.quote(prompt)
-    url = f"https://gen.pollinations.ai/audio/{encoded}"
-    params = {"model": "elevenmusic", "nologo": "true"}
-
-    last_err = ""
-    for attempt in range(len(_POLLINATIONS_KEYS_LIST) + 1):
-        key = pollinations_pool.get_key()
-        headers = {"Authorization": f"Bearer {key}"}
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
-                async with session.get(url, params=params, headers=headers) as resp:
-                    body_text = ""
-                    if resp.status != 200:
-                        body_text = await resp.text()
-                    if pollinations_pool.is_quota_error(resp.status, body_text):
-                        pollinations_pool.mark_quota_exceeded(key)
-                        last_err = f"HTTP {resp.status}: {body_text[:100]}"
-                        continue
-                    if resp.status == 200:
-                        data = await resp.read()
-                        if len(data) < 1000:
-                            raise RuntimeError(f"ElevenLabs вернул слишком маленький файл ({len(data)} байт) — попробуй другой промпт")
-                        return data
-                    last_err = f"HTTP {resp.status}: {body_text[:200]}"
-        except RuntimeError:
-            raise
-        except Exception as e:
-            last_err = str(e)
-        await asyncio.sleep(2)
-    raise RuntimeError(f"Pollinations ElevenLabs: все ключи исчерпаны. Последняя ошибка: {last_err}")
 
 
 # ─── Suno v5 через  ───────────────────────────────────────────────
@@ -712,8 +666,6 @@ MODELS = {
     "gpt52":         {"name": "gpt-5.2",            "provider": "sq", "label": "⚡ GPT-5.2 📸",           "vision": True,  "premium": True},
     "gpt52_chat":    {"name": "gpt-5.2-chat",       "provider": "sq", "label": "💬 GPT-5.2 Chat",         "vision": False, "premium": False},
     # DeepSeek (IO модели оставляем — работают через fallback)
-    "deepseek_v3":   {"name": "deepseek-ai/DeepSeek-V3.2",    "provider": "io", "label": "🧬 DeepSeek V3.2",   "vision": False},
-    "deepseek_r1":   {"name": "deepseek-ai/DeepSeek-R1-0528", "provider": "io", "label": "🧠 DeepSeek R1",     "vision": False},
     "deepseek_v3_sq":{"name": "deepseek-v3",                  "provider": "sq", "label": "🧬 DeepSeek V3",     "vision": False},
     # Qwen (убраны IO-шные vision модели — не работают)
     "qwen3_max":     {"name": "qwen3-max",       "provider": "sq", "label": "🌐 Qwen3-Max",    "vision": False},
@@ -724,8 +676,6 @@ MODELS = {
     "command_vision": {"name": "command-a-vision-07-2025",    "provider": "sq", "label": "👁️ Command Vision 📸", "vision": True},
     "command_reason": {"name": "command-a-reasoning-08-2025", "provider": "sq", "label": "🧩 Command Reasoning",  "vision": False},
     # Kimi (IO, убраны GLM которые отвечают "..." и не работают)
-    "moonshot":       {"name": "moonshotai/Kimi-K2-Instruct-0905", "provider": "io", "label": "🌙 Kimi K2", "vision": False},
-    "glm47":          {"name": "zai-org/GLM-4.7",                  "provider": "io", "label": "🔮 GLM-4.7", "vision": False},
     # C4AI (убрана Vision 8B — too many tokens, оставлена 32B)
     "c4ai_32b":      {"name": "c4ai-aya-expanse-32b", "provider": "sq", "label": "🌀 C4AI Aya 32B",       "vision": False},
     "c4ai_8b":       {"name": "c4ai-aya-expanse-8b",  "provider": "sq", "label": "🌀 C4AI Aya 8B",        "vision": False},
@@ -764,7 +714,7 @@ CATEGORIES: dict[str, tuple[str, list[str]]] = {
     ),
     "cat_deepseek": (
         "🧬 DeepSeek",
-        ["deepseek_r1", "deepseek_v3", "deepseek_v3_sq"],
+        ["deepseek_v3_sq"],
     ),
     "cat_qwen": (
         "🌐 Qwen (Alibaba)",
@@ -773,10 +723,6 @@ CATEGORIES: dict[str, tuple[str, list[str]]] = {
     "cat_command": (
         "⚙️ Command (Cohere)",
         ["command_a", "command_vision", "command_reason"],
-    ),
-    "cat_kimi_glm": (
-        "🔮 Kimi & GLM",
-        ["moonshot", "glm47"],
     ),
     "cat_c4ai": (
         "🌀 C4AI (Aya)",
@@ -1156,7 +1102,6 @@ user_referrals    = {}
 REF_BONUS_INVITER = 5
 REF_BONUS_NEW     = 10
 user_history      = {}  # {uid: [{"q","a","model","ts"}]} — последние 10
-user_favorites: dict = {}  # uid -> [{"name": str, "text": str}]
 user_favorites: dict = {}  # uid -> [{"name": str, "text": str}]
 
 # ── Режимы ответа ─────────────────────────────────────────
@@ -3574,21 +3519,11 @@ def _get_file_system_prompt(file_name: str, user_text: str = "") -> str:
 
 async def call_chat(messages: list, model_key: str, max_tokens: int = 1500) -> str:
     m = MODELS[model_key]
-    provider = m["provider"]
-    url     = SQ_CHAT if provider == "sq" else IO_CHAT
-    api_key = SQ_KEY   if provider == "sq" else IO_KEY
+    # All models go through SQ
     payload = {"model": m["name"], "messages": messages, "max_tokens": max_tokens}
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    _slow = any(s in m["name"] for s in ["qwen3-max", "DeepSeek-R1", "GLM-4.7", "Kimi-K2"])
+    headers = {"Authorization": f"Bearer {SQ_KEY}", "Content-Type": "application/json"}
+    _slow = any(s in m["name"] for s in ["qwen3-max", "DeepSeek-R1", "DeepSeek-V3"])
     _tmo  = 300 if _slow else 180
-
-    # Маппинг IO-моделей на SQ-аналоги для fallback
-    IO_TO_SQ_FALLBACK = {
-        "deepseek_v3":  "deepseek_v3_sq",
-        "deepseek_r1":  "deepseek_v3_sq",
-        "moonshot":     "qwen3_max",
-        "glm47":        "qwen3_max",
-    }
 
     # Задержки между попытками: 1-я retry → 2 сек, 2-я retry → 5 сек
     _retry_delays = [0, 2, 5]
@@ -3598,24 +3533,9 @@ async def call_chat(messages: list, model_key: str, max_tokens: int = 1500) -> s
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=_tmo, connect=20)
             ) as s:
-                async with s.post(url, headers=headers, json=payload) as r:
+                async with s.post(SQ_CHAT, headers=headers, json=payload) as r:
                     if r.status != 200:
                         err = await r.text()
-                        # Если IO ключ устарел — пробуем SQ fallback
-                        if provider == "io" and ("unauthorized" in err.lower() or "token has expired" in err.lower() or r.status in (401, 403)):
-                            logging.warning(f"IO token expired for {model_key}, trying SQ fallback")
-                            fallback_key = IO_TO_SQ_FALLBACK.get(model_key, "deepseek_v3_sq")
-                            if fallback_key in MODELS and fallback_key not in disabled_models:
-                                fb = MODELS[fallback_key]
-                                fb_payload = {"model": fb["name"], "messages": messages, "max_tokens": max_tokens}
-                                fb_headers = {"Authorization": f"Bearer {SQ_KEY}", "Content-Type": "application/json"}
-                                async with s.post(SQ_CHAT, headers=fb_headers, json=fb_payload) as r2:
-                                    if r2.status == 200:
-                                        res2 = await r2.json()
-                                        raw2 = res2["choices"][0]["message"].get("content") or ""
-                                        result2 = raw2.split("</think>")[-1].strip() or raw2.strip() or "..."
-                                        logging.info(f"IO fallback ok: {model_key} → {fallback_key}")
-                                        return result2
                         raise RuntimeError(f"API {r.status}: {err[:400]}")
                     res = await r.json()
                     msg_obj = res["choices"][0]["message"]
@@ -4084,209 +4004,6 @@ async def generate_image(prompt: str, img_model_key: str, ratio: str = "1:1",
 # 🎵 MUSIC GENERATION (Pollinations)
 # ==================================================================
 
-async def suno_generate(*args, **kwargs) -> dict:
-    """Stub — заменён на Pollinations."""
-    raise NotImplementedError("Suno заменён на Pollinations")
-
-async def suno_get_result(task_id: str) -> dict:
-    """Stub — заменён на Pollinations."""
-    return {"status": "processing"}
-
-
-
-
-
-
-def main_reply_kb(uid: int) -> ReplyKeyboardMarkup:
-    # Кнопка "Открыть Хуза ИИ" УБРАНА — она теперь слева в поле ввода (MenuButtonWebApp)
-    # Остальные кнопки навигации оставлены
-    rows = [
-        [KeyboardButton(text="💬 Написать"), KeyboardButton(text="🎨 Создать")],
-        [KeyboardButton(text="👤 Профиль"),  KeyboardButton(text="💎 Подписка")],
-        [KeyboardButton(text="🏠 Главная")],
-    ]
-    if uid in ADMIN_IDS:
-        rows.append([KeyboardButton(text="🔥 Админ")])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
-
-
-def home_kb(uid: int) -> InlineKeyboardMarkup:
-    sub_text = "💎 Подписка активна" if has_active_sub(uid) else "💎 Купить подписку"
-    built = [
-        [
-            InlineKeyboardButton(text="💬 Написать",          callback_data="menu_ask"),
-            InlineKeyboardButton(text="👤 Профиль",           callback_data="menu_profile"),
-        ],
-        [
-            InlineKeyboardButton(text="🎨 Картинки · Видео",  callback_data="menu_extra"),
-        ],
-        [
-            InlineKeyboardButton(text="🧹 Очистить память",   callback_data="clear_memory"),
-            InlineKeyboardButton(text="⭐ Избранное",          callback_data="menu_favorites"),
-        ],
-        [
-            InlineKeyboardButton(text="💬 Поддержка",         callback_data="menu_support"),
-            InlineKeyboardButton(text=sub_text,               callback_data="sub_menu"),
-        ],
-    ]
-    if uid in ADMIN_IDS:
-        built.append([InlineKeyboardButton(text="⚙️ Админ", callback_data="menu_admin")])
-    return InlineKeyboardMarkup(inline_keyboard=built)
-
-
-_MODEL_WEB_KEYS = {"sonar", "sonar_pro", "sonar_reasoning_pro", "sonar_deep_research"}
-# Sonar (базовый) доступен без подписки — остальные Sonar — платные
-_WEB_FREE_KEY = "sonar"
-
-# ══════════════════════════════════════════════════════════════════════
-# 🎨 ПРЯМЫЕ API-ВЫЗОВЫ ДЛЯ ЦВЕТНЫХ КНОПОК (style: "success" / "danger")
-# aiogram не поддерживает поле "style" — используем raw HTTP к Telegram API
-# ══════════════════════════════════════════════════════════════════════
-
-def _get_model_label(uid: int) -> str:
-    """Читаемое название текущей модели пользователя."""
-    mk = get_model_key(uid)
-    if mk == "auto":
-        return "⚡ Авто"
-    if mk.startswith("imggen:"):
-        return "🎨 " + IMG_MODELS.get(mk.split(":")[1], {}).get("label", mk)
-    return MODELS.get(mk, {}).get("label", mk)
-
-
-def _model_sub_menu_text(uid: int) -> str:
-    """Текст над кнопками меню выбора модели."""
-    cur_label = _get_model_label(uid)
-    return (
-        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
-        "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
-        "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
-        f"✅ Выбрана модель: <code>{cur_label}</code>\n"
-        "◈ 🔒 — только с подпиской\n"
-        "◈ 📸 — поддерживает анализ фото\n\n"
-        "▾ Выбери категорию\n"
-        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
-    )
-
-
-def _ai_menu_json(uid: int) -> dict:
-    """
-    Главное меню (4 кнопки): возвращает raw JSON для Telegram API.
-    Доступные кнопки горят зелёным (style='success'), закрытые — без стиля.
-    """
-    cur_mk  = get_model_key(uid)
-    has_sub = has_active_sub(uid)
-
-    def _cur_cat() -> str:
-        if cur_mk == "auto": return "auto"
-        if cur_mk in _MODEL_WEB_KEYS: return "web"
-        return "paid" if MODELS.get(cur_mk, {}).get("premium") else "free"
-
-    cur_cat = _cur_cat()
-
-    def _btn(text: str, cb: str, style: str | None = None) -> dict:
-        b: dict = {"text": text, "callback_data": cb}
-        if style:
-            b["style"] = style
-        return b
-
-    # Авто — всегда доступен, зелёный если активен или доступен
-    auto_style  = "success"
-    free_style  = "success"                        # всегда доступны
-    paid_style  = "success" if has_sub else None   # только с подпиской
-    web_style   = "success" if has_sub else None   # только с подпиской
-
-    # Если текущая категория активна — всё равно зелёный
-    auto_text = ("✅ " if cur_cat == "auto" else "") + "⚡ Авто"
-    free_text = ("✅ " if cur_cat == "free" else "") + "🆓 Бесплатные"
-    paid_text = ("✅ " if cur_cat == "paid" else "🔒 " if not has_sub else "") + "🔥 Платные"
-    web_text  = ("✅ " if cur_cat == "web"  else "🔒 " if not has_sub else "") + "🌐 Веб-поиск"
-
-    return {
-        "inline_keyboard": [
-            [_btn(auto_text, "modelcat_auto", auto_style)],
-            [
-                _btn(free_text, "modelcat_free", free_style),
-                _btn(paid_text, "modelcat_paid", paid_style),
-                _btn(web_text,  "modelcat_web",  web_style),
-            ],
-            [{"text": "🎨 Генерация картинок", "callback_data": "menu_imggen"}],
-            [{"text": "🏠 Главная",            "callback_data": "menu_home"}],
-        ]
-    }
-
-
-def _modelcat_free_json(uid: int) -> dict:
-    """Подменю бесплатных моделей — raw JSON с зелёными кнопками для активной."""
-    cur_mk = get_model_key(uid)
-    free_keys = [
-        k for k, v in MODELS.items()
-        if k != "auto" and not v.get("premium") and k not in disabled_models and k not in _MODEL_WEB_KEYS
-    ]
-    rows = []
-    for i in range(0, len(free_keys), 2):
-        pair = free_keys[i:i+2]
-        row = []
-        for k in pair:
-            m = MODELS[k]
-            is_active = (k == cur_mk)
-            btn: dict = {
-                "text": ("✅ " if is_active else "") + m["label"],
-                "callback_data": f"set_{k}",
-            }
-            if is_active:
-                btn["style"] = "success"
-            row.append(btn)
-        rows.append(row)
-    rows.append([{"text": "◀️ Назад", "callback_data": "back_main"}])
-    return {"inline_keyboard": rows}
-
-
-def _modelcat_paid_json(uid: int) -> dict:
-    """Подменю платных моделей — raw JSON."""
-    cur_mk  = get_model_key(uid)
-    has_sub = has_active_sub(uid)
-    paid_keys = [
-        k for k, v in MODELS.items()
-        if k != "auto" and v.get("premium") and k not in disabled_models and k not in _MODEL_WEB_KEYS
-    ]
-    rows = []
-    for i in range(0, len(paid_keys), 2):
-        pair = paid_keys[i:i+2]
-        row = []
-        for k in pair:
-            m = MODELS[k]
-            is_active = (k == cur_mk)
-            if is_active:
-                btn: dict = {"text": "✅ " + m["label"], "callback_data": f"set_{k}", "style": "success"}
-            elif has_sub:
-                btn = {"text": m["label"], "callback_data": f"set_{k}"}
-            else:
-                btn = {"text": "🔒 " + m["label"], "callback_data": f"set_{k}"}
-            row.append(btn)
-        rows.append(row)
-    rows.append([{"text": "◀️ Назад", "callback_data": "back_main"}])
-    return {"inline_keyboard": rows}
-
-
-def _modelcat_web_json(uid: int) -> dict:
-    """Подменю веб-поиска — raw JSON."""
-    cur_mk  = get_model_key(uid)
-    has_sub = has_active_sub(uid)
-    web_keys = [k for k in _MODEL_WEB_KEYS if k in MODELS and k not in disabled_models]
-    rows = []
-    for k in web_keys:
-        m = MODELS[k]
-        is_active   = (k == cur_mk)
-        is_free_web = (k == _WEB_FREE_KEY)
-        if is_active:
-            btn: dict = {"text": "✅ " + m["label"], "callback_data": f"set_{k}", "style": "success"}
-        elif is_free_web or has_sub:
-            btn = {"text": m["label"], "callback_data": f"set_{k}"}
-        else:
-            btn = {"text": "🔒 " + m["label"], "callback_data": f"set_{k}"}
-        rows.append([btn])
-    rows.append([{"text": "◀️ Назад", "callback_data": "back_main"}])
-    return {"inline_keyboard": rows}
 
 
 async def _tg_send_model_menu(chat_id: int, uid: int) -> None:
@@ -12195,7 +11912,7 @@ async def hist_clear_cb(callback: CallbackQuery):
 async def profile_reflink(callback: CallbackQuery):
     uid = callback.from_user.id
     bot_info = await bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start=ref{uid}"
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
     refs = user_referrals.get(uid, {}).get("refs", [])
     earned = len(refs) * REF_BONUS_INVITER
     text = (
@@ -14360,7 +14077,12 @@ async def menu_photofusion(callback: CallbackQuery):
 # ==================================================================
 
 @dp.message(F.text)
-async def handle_text(message: Message):
+async def handle_text(message: Message, state: FSMContext):
+    # ── FSM-приоритет: если пользователь в состоянии избранного — не обрабатываем текст ──
+    _cur_state = await state.get_state()
+    if _cur_state in ("fav_waiting_text", "fav_waiting_name"):
+        return  # Передаём управление FSM-хендлерам
+
     uid = message.from_user.id
     _init_tokens(uid)
     _init_limits(uid)
@@ -18128,29 +17850,7 @@ async def api_transcribe_handler(request: aiohttp_web.Request) -> aiohttp_web.Re
         except Exception as e:
             last_err = str(e)[:100]
 
-        # Попытка 2: IO Whisper
-        if not text:
-            try:
-                timeout_io = aiohttp.ClientTimeout(total=90, connect=20, sock_read=70)
-                async with aiohttp.ClientSession(timeout=timeout_io) as sess:
-                    with open(use_path, "rb") as af:
-                        form_data2 = aiohttp.FormData()
-                        form_data2.add_field("file", af, filename=os.path.basename(use_path), content_type="audio/wav")
-                        form_data2.add_field("model", IO_WHISPER)
-                        form_data2.add_field("language", "ru")
-                        form_data2.add_field("response_format", "json")
-                        async with sess.post(
-                            IO_AUDIO,
-                            headers={"Authorization": f"Bearer {IO_KEY}"},
-                            data=form_data2,
-                        ) as r2:
-                            if r2.status == 200:
-                                res2 = await r2.json()
-                                text = res2.get("text", "").strip()
-                            else:
-                                last_err += f" | IO {r2.status}"
-            except Exception as e2:
-                last_err += f" | {str(e2)[:60]}"
+
 
         # Чистим файлы
         for p in [tmp_path, wav_path]:
@@ -19217,7 +18917,7 @@ async def cmd_ref(message: Message):
     """Команда /ref — реферальная карточка (Задача 12)."""
     uid = message.from_user.id
     bot_info = await bot.get_me()
-    ref_link = f"https://t.me/{bot_info.username}?start=ref{uid}"
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
     refs = user_referrals.get(uid, {}).get("refs", [])
     earned = len(refs) * REF_BONUS_INVITER
     text = premium_html(
@@ -19470,7 +19170,7 @@ async def inline_query_handler(inline_query: InlineQuery):
     deep_link = f"https://t.me/{bot_info.username}?start=q_{query[:50].replace(' ', '_')}"
 
     answer_text = ""
-    if len(query.split()) <= 4:
+    if len(query) <= 200:
         try:
             _msgs = [
                 {"role": "system", "content": f"Ты — {BOT_NAME}. Отвечай ОЧЕНЬ кратко — 1-2 предложения max."},
@@ -19816,7 +19516,7 @@ async def inline_query_handler(inline_query: InlineQuery):
     deep_link = f"https://t.me/{bot_info.username}?start=q_{query[:50].replace(' ', '_')}"
 
     answer_text = ""
-    if len(query.split()) <= 4:
+    if len(query) <= 200:
         try:
             _msgs = [
                 {"role": "system", "content": f"Ты — {BOT_NAME}. Отвечай ОЧЕНЬ кратко — 1-2 предложения max."},
