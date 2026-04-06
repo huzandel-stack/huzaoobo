@@ -4052,6 +4052,46 @@ async def _tg_edit_model_menu(chat_id: int, message_id: int, uid: int,
         return False
 
 
+
+
+def main_reply_kb(uid: int) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text="💬 Написать"), KeyboardButton(text="🎨 Создать")],
+        [KeyboardButton(text="👤 Профиль"),  KeyboardButton(text="💎 Подписка")],
+        [KeyboardButton(text="🏠 Главная")],
+    ]
+    if uid in ADMIN_IDS:
+        rows.append([KeyboardButton(text="🔥 Админ")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def home_kb(uid: int) -> InlineKeyboardMarkup:
+    sub_text = "💎 Подписка активна" if has_active_sub(uid) else "💎 Купить подписку"
+    built = [
+        [
+            InlineKeyboardButton(text="💬 Написать",         callback_data="menu_ask"),
+            InlineKeyboardButton(text="👤 Профиль",          callback_data="menu_profile"),
+        ],
+        [
+            InlineKeyboardButton(text="🎨 Картинки · Видео", callback_data="menu_extra"),
+        ],
+        [
+            InlineKeyboardButton(text="🧹 Очистить память",  callback_data="clear_memory"),
+            InlineKeyboardButton(text="⭐ Избранное",         callback_data="menu_favorites"),
+        ],
+        [
+            InlineKeyboardButton(text="💬 Поддержка",        callback_data="menu_support"),
+            InlineKeyboardButton(text=sub_text,              callback_data="sub_menu"),
+        ],
+    ]
+    if uid in ADMIN_IDS:
+        built.append([InlineKeyboardButton(text="⚙️ Админ", callback_data="menu_admin")])
+    return InlineKeyboardMarkup(inline_keyboard=built)
+
+
+_MODEL_WEB_KEYS = {"sonar", "sonar_pro", "sonar_reasoning_pro", "sonar_deep_research"}
+_WEB_FREE_KEY = "sonar"
+
 async def _tg_send_raw(chat_id: int, text: str, reply_markup: dict,
                         parse_mode: str = "HTML", uid: int = 0) -> None:
     """Отправить сообщение с произвольной raw-клавиатурой + placeholder модели."""
