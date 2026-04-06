@@ -14270,6 +14270,51 @@ async def menu_photofusion(callback: CallbackQuery):
 
 
 # ==================================================================
+# ⭐ FSM-ХЕНДЛЕРЫ ИЗБРАННЫХ ПРОМПТОВ (до handle_text, иначе F.text перехватит)
+# ==================================================================
+
+@dp.message(StateFilter(FavStates.waiting_text))
+async def fav_receive_text_early(message: Message, state: FSMContext):
+    uid = message.from_user.id
+    fav_text = (message.text or "").strip()
+    if not fav_text:
+        return await message.answer("❌ Пустой текст, попробуй снова.")
+    await state.update_data(fav_text=fav_text)
+    await state.set_state(FavStates.waiting_name)
+    await message.answer(
+        f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> Теперь напиши <b>название</b> для этого промпта\n'
+        f'(до 30 символов)',
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Отмена", callback_data="menu_favorites", icon_custom_emoji_id=PE["cross"])
+        ]])
+    )
+
+
+@dp.message(StateFilter(FavStates.waiting_name))
+async def fav_receive_name_early(message: Message, state: FSMContext):
+    uid  = message.from_user.id
+    name = (message.text or "").strip()[:30]
+    if not name:
+        return await message.answer("❌ Пустое название, попробуй снова.")
+    data = await state.get_data()
+    fav_text = data.get("fav_text", "")
+    favs = user_favorites.get(uid, [])
+    favs.append({"name": name, "text": fav_text})
+    user_favorites[uid] = favs
+    asyncio.create_task(db_save_user(uid))
+    await state.clear()
+    await message.answer(
+        f'<tg-emoji emoji-id="{PE["check"]}">✅</tg-emoji> <b>Сохранено:</b> {name}',
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Мои промпты", callback_data="menu_favorites", icon_custom_emoji_id=PE["tag"]),
+            InlineKeyboardButton(text="Меню", callback_data="back_home", icon_custom_emoji_id=PE["home"]),
+        ]])
+    )
+
+
+# ==================================================================
 # 💬 ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ
 # ==================================================================
 
@@ -14278,7 +14323,7 @@ async def handle_text(message: Message, state: FSMContext):
     # ── FSM-приоритет: если пользователь в состоянии избранного — не обрабатываем текст ──
     _cur_state = await state.get_state()
     if _cur_state in (FavStates.waiting_text.state, FavStates.waiting_name.state):
-        return  # Передаём управление FSM-хендлерам
+        return  # Передаём управление FSM-хендлерам (не должно сюда доходить, страховка)
 
     uid = message.from_user.id
     _init_tokens(uid)
@@ -19296,47 +19341,6 @@ async def cb_fav_add(callback: CallbackQuery, state: FSMContext):
         ]])
     )
     await state.set_state(FavStates.waiting_text)
-
-
-@dp.message(StateFilter(FavStates.waiting_text))
-async def fav_receive_text(message: Message, state: FSMContext):
-    uid = message.from_user.id
-    fav_text = (message.text or "").strip()
-    if not fav_text:
-        return await message.answer("❌ Пустой текст, попробуй снова.")
-    await state.update_data(fav_text=fav_text)
-    await state.set_state(FavStates.waiting_name)
-    await message.answer(
-        f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> Теперь напиши <b>название</b> для этого промпта\n'
-        f'(до 30 символов)',
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Отмена", callback_data="menu_favorites", icon_custom_emoji_id=PE["cross"])
-        ]])
-    )
-
-
-@dp.message(StateFilter(FavStates.waiting_name))
-async def fav_receive_name(message: Message, state: FSMContext):
-    uid  = message.from_user.id
-    name = (message.text or "").strip()[:30]
-    if not name:
-        return await message.answer("❌ Пустое название, попробуй снова.")
-    data = await state.get_data()
-    fav_text = data.get("fav_text", "")
-    favs = user_favorites.get(uid, [])
-    favs.append({"name": name, "text": fav_text})
-    user_favorites[uid] = favs
-    asyncio.create_task(db_save_user(uid))
-    await state.clear()
-    await message.answer(
-        f'<tg-emoji emoji-id="{PE["check"]}">✅</tg-emoji> <b>Сохранено:</b> {name}',
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Мои промпты", callback_data="menu_favorites", icon_custom_emoji_id=PE["tag"]),
-            InlineKeyboardButton(text="Меню", callback_data="back_home", icon_custom_emoji_id=PE["home"]),
-        ]])
-    )
 
 
 # ==================================================================
