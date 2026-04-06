@@ -3648,67 +3648,75 @@ def _clean_prompt_banned(text: str, banned_dict: dict) -> str:
 
 async def enhance_prompt_ai(raw_prompt: str, mode: str = "image", lang: str = "en") -> str:
     """
-    Улучшает промпт для генерации ИЗОБРАЖЕНИЙ:
-    1. Очищает от запрещённых слов
-    2. Переводит на английский если нужно
-    3. Добавляет теги качества, освещения, стиля
-    4. Расширяет описание деталями
+    Elite AI Prompt Engineer для генерации изображений (Flux / Midjourney / SD уровень PRO).
+    Определяет тип запроса (thumbnail, avatar, art, cinematic) и строит вирусный детализированный промпт.
     """
     # Шаг 1: Очистка запрещённых слов
     cleaned = _clean_prompt_banned(raw_prompt, _IMG_BANNED_WORDS)
     if not cleaned or len(cleaned.strip()) < 2:
         cleaned = "abstract digital art"
 
-    # Шаг 2: Определяем нужен ли перевод
-    en_words = sum(1 for w in cleaned.split() if all(c.isascii() for c in w))
-    ratio = en_words / max(len(cleaned.split()), 1)
-    # Если уже хороший английский и длинный промпт — только добавляем теги
-    if ratio > 0.75 and len(cleaned) > 40:
-        sys_p = (
-            "You are an expert prompt engineer for image generation models. "
-            "The user has an English prompt. Enhance it by adding: "
-            "specific lighting (golden hour, cinematic, neon, soft diffused, etc.), "
-            "camera details (bokeh, wide-angle, macro, etc.), "
-            "quality tags (8K, hyperdetailed, masterpiece, sharp focus), "
-            "and artistic style if missing. "
-            "Keep the original concept 100% intact. "
-            "Output max 80 words. Return ONLY the enhanced prompt, nothing else."
-        )
-        user_p = cleaned
-    else:
-        # Переводим + улучшаем
-        sys_p = (
-            "You are an expert prompt engineer for image generation models. "
-            "Translate the idea to English and create a rich, detailed prompt. "
-            "Include: main subject with details, environment/background, "
-            "lighting style (golden hour, studio, neon glow, etc.), "
-            "camera style (bokeh, wide shot, portrait lens), "
-            "artistic style (photorealistic, oil painting, digital art, etc.), "
-            "quality tags (8K UHD, hyperdetailed, masterpiece, sharp focus). "
-            "Keep the original meaning 100%. "
-            "Output max 80 words. Return ONLY the prompt in English, nothing else."
-        )
-        user_p = cleaned
+    sys_p = (
+        "You are an elite AI Prompt Engineer for image generation (Flux / Midjourney / Stable Diffusion PRO level). "
+        "Your task: transform any user request into a VIRAL, DETAILED, VISUALLY POWERFUL prompt.\n\n"
+
+        "STEP 1 — DETECT REQUEST TYPE:\n"
+        "• Words like 'обложка', 'превью', 'thumbnail', 'ютуб', 'youtube', 'tiktok', 'cover' → TYPE = THUMBNAIL\n"
+        "• Words like 'аватар', 'avatar', 'profile', 'фото профиля' → TYPE = AVATAR (portrait, face focus)\n"
+        "• Words like 'арт', 'art', 'рисунок', 'иллюстрация', 'illustration', 'anime' → TYPE = ART (artistic style)\n"
+        "• Otherwise → TYPE = CINEMATIC (cinematic realism)\n\n"
+
+        "STEP 2 — IF TYPE IS THUMBNAIL (top priority rules):\n"
+        "MUST add: 'youtube thumbnail style', "
+        "'big bold text saying: [SHORT CLICKBAIT VERSION OF THE IDEA IN CAPS]', "
+        "'high contrast', dramatic emotion (conflict / tension / excitement / shock), "
+        "main subject centered + space for text overlay, vivid saturated colors, explosive energy.\n\n"
+
+        "STEP 3 — ALWAYS ADD:\n"
+        "• ultra realistic OR cinematic\n"
+        "• dramatic lighting / neon glow / golden hour / volumetric light\n"
+        "• depth of field, sharp focus, highly detailed, 4K / 8K\n\n"
+
+        "STEP 4 — ADD CINEMATOGRAPHY:\n"
+        "camera angle (close-up / wide shot / low angle / bird's eye), "
+        "lens (50mm / 85mm portrait / wide angle), "
+        "atmosphere (fog, particles, light rays, bokeh background).\n\n"
+
+        "STEP 5 — IF REQUEST IS VAGUE: invent strong visual details yourself to amplify the idea.\n\n"
+
+        "OUTPUT RULES:\n"
+        "- Translate everything to English.\n"
+        "- Output ONLY the final prompt. No explanations. No preamble.\n"
+        "- Max 100 words.\n"
+        "- NEVER start with: 'Here', 'Sure', 'I', 'This', 'The prompt'."
+    )
 
     try:
-        msgs = [{"role": "system", "content": sys_p},
-                {"role": "user", "content": user_p}]
-        result = (await call_chat(msgs, "claude_haiku", max_tokens=150)).strip()
-        # Если что-то пошло не так — возвращаем очищенный оригинал
-        if (not result or len(result) < 5
-                or result.startswith("I ")
-                or "sorry" in result.lower()
-                or "cannot" in result.lower()
-                or result.startswith("Sure,")
-                or result.startswith("Here")):
-            # Добавляем минимальные теги качества к очищенному промпту
+        msgs = [
+            {"role": "system", "content": sys_p},
+            {"role": "user",   "content": cleaned}
+        ]
+        result = (await call_chat(msgs, "claude_haiku", max_tokens=180)).strip()
+
+        # Защита от плохого ответа
+        en_words = sum(1 for w in cleaned.split() if all(c.isascii() for c in w))
+        ratio = en_words / max(len(cleaned.split()), 1)
+        bad = (
+            not result
+            or len(result) < 5
+            or result.lower().startswith(("i ", "sure", "here", "this", "the prompt", "sorry", "cannot"))
+            or "sorry" in result.lower()
+            or "cannot" in result.lower()
+        )
+        if bad:
             base = cleaned if ratio > 0.5 else f"digital art, {cleaned}"
-            return base + ", 8K, hyperdetailed, masterpiece"
-        # Финальная очистка результата
+            return base + ", cinematic lighting, ultra detailed, 8K, sharp focus"
+
         result = _clean_prompt_banned(result, _IMG_BANNED_WORDS)
         return result
+
     except Exception:
-        return cleaned + ", 8K, hyperdetailed"
+        return cleaned + ", cinematic lighting, 8K, hyperdetailed"
 
 
 async def generate_music_lyrics(wishes: str, style_desc: str, style_tags: str, lang: str = "en") -> str:
