@@ -4011,60 +4011,147 @@ async def generate_image(prompt: str, img_model_key: str, ratio: str = "1:1",
 # ------------------------------------------------------------------
 
 def _get_model_label(uid: int) -> str:
-    """Возвращает человекочитаемый лейбл текущей модели пользователя."""
+    """Читаемое название текущей модели пользователя."""
     mk = get_model_key(uid)
     if mk == "auto":
         return "⚡ Авто"
+    if mk.startswith("imggen:"):
+        return "🎨 " + IMG_MODELS.get(mk.split(":")[1], {}).get("label", mk)
     return MODELS.get(mk, {}).get("label", mk)
 
 
-def _kb_to_json(kb: InlineKeyboardMarkup) -> dict:
-    """Конвертирует aiogram InlineKeyboardMarkup в raw-dict для Telegram Bot API."""
-    rows = []
-    for row in kb.inline_keyboard:
-        buttons = []
-        for btn in row:
-            b: dict = {"text": btn.text}
-            if btn.callback_data:
-                b["callback_data"] = btn.callback_data
-            elif btn.url:
-                b["url"] = btn.url
-            buttons.append(b)
-        rows.append(buttons)
-    return {"inline_keyboard": rows}
-
-
-def _ai_menu_json(uid: int) -> dict:
-    """Raw-dict главного меню выбора категории модели."""
-    return _kb_to_json(ai_menu_kb(uid))
-
-
 def _model_sub_menu_text(uid: int) -> str:
-    """Текст для главного меню выбора модели."""
-    label = _get_model_label(uid)
-    has_sub = has_active_sub(uid)
-    sub_str = "💎 Подписка активна" if has_sub else "🆓 Без подписки"
+    """Текст над кнопками меню выбора модели."""
+    cur_label = _get_model_label(uid)
     return (
-        f"🤖 <b>Выбор нейросети</b>\n\n"
-        f"✅ Текущая модель: <code>{label}</code>\n"
-        f"◈ {sub_str}\n\n"
-        f"Выбери категорию:"
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+        "🤖 <b>ВЫБОР МОДЕЛИ</b>\n"
+        "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
+        f"✅ Выбрана модель: <code>{cur_label}</code>\n"
+        "◈ 🔒 — только с подпиской\n"
+        "◈ 📸 — поддерживает анализ фото\n\n"
+        "▾ Выбери категорию\n"
+        "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔"
     )
 
 
+def _ai_menu_json(uid: int) -> dict:
+    """
+    Главное меню (4 кнопки): raw JSON для Telegram API.
+    Доступные кнопки горят зелёным (style='success'), закрытые — без стиля.
+    """
+    cur_mk  = get_model_key(uid)
+    has_sub = has_active_sub(uid)
+
+    def _cur_cat() -> str:
+        if cur_mk == "auto": return "auto"
+        if cur_mk in _MODEL_WEB_KEYS: return "web"
+        return "paid" if MODELS.get(cur_mk, {}).get("premium") else "free"
+
+    cur_cat = _cur_cat()
+
+    def _btn(text: str, cb: str, style: str | None = None) -> dict:
+        b: dict = {"text": text, "callback_data": cb}
+        if style:
+            b["style"] = style
+        return b
+
+    auto_style = "success"
+    free_style = "success"
+    paid_style = "success" if has_sub else None
+    web_style  = "success" if has_sub else None
+
+    auto_text = ("✅ " if cur_cat == "auto" else "") + "⚡ Авто"
+    free_text = ("✅ " if cur_cat == "free" else "") + "🆓 Бесплатные"
+    paid_text = ("✅ " if cur_cat == "paid" else "🔒 " if not has_sub else "") + "🔥 Платные"
+    web_text  = ("✅ " if cur_cat == "web"  else "🔒 " if not has_sub else "") + "🌐 Веб-поиск"
+
+    return {
+        "inline_keyboard": [
+            [_btn(auto_text, "modelcat_auto", auto_style)],
+            [
+                _btn(free_text, "modelcat_free", free_style),
+                _btn(paid_text, "modelcat_paid", paid_style),
+                _btn(web_text,  "modelcat_web",  web_style),
+            ],
+            [{"text": "🎨 Генерация картинок", "callback_data": "menu_imggen"}],
+            [{"text": "🏠 Главная",            "callback_data": "menu_home"}],
+        ]
+    }
+
+
 def _modelcat_free_json(uid: int) -> dict:
-    """Raw-dict подменю бесплатных моделей."""
-    return _kb_to_json(_modelcat_free_kb(uid))
+    """Подменю бесплатных моделей — raw JSON с зелёными кнопками для активной."""
+    cur_mk = get_model_key(uid)
+    free_keys = [
+        k for k, v in MODELS.items()
+        if k != "auto" and not v.get("premium") and k not in disabled_models and k not in _MODEL_WEB_KEYS
+    ]
+    rows = []
+    for i in range(0, len(free_keys), 2):
+        pair = free_keys[i:i+2]
+        row = []
+        for k in pair:
+            m = MODELS[k]
+            is_active = (k == cur_mk)
+            btn: dict = {
+                "text": ("✅ " if is_active else "") + m["label"],
+                "callback_data": f"set_{k}",
+            }
+            if is_active:
+                btn["style"] = "success"
+            row.append(btn)
+        rows.append(row)
+    rows.append([{"text": "◀️ Назад", "callback_data": "back_main"}])
+    return {"inline_keyboard": rows}
 
 
 def _modelcat_paid_json(uid: int) -> dict:
-    """Raw-dict подменю платных моделей."""
-    return _kb_to_json(_modelcat_paid_kb(uid))
+    """Подменю платных моделей — raw JSON."""
+    cur_mk  = get_model_key(uid)
+    has_sub = has_active_sub(uid)
+    paid_keys = [
+        k for k, v in MODELS.items()
+        if k != "auto" and v.get("premium") and k not in disabled_models and k not in _MODEL_WEB_KEYS
+    ]
+    rows = []
+    for i in range(0, len(paid_keys), 2):
+        pair = paid_keys[i:i+2]
+        row = []
+        for k in pair:
+            m = MODELS[k]
+            is_active = (k == cur_mk)
+            if is_active:
+                btn: dict = {"text": "✅ " + m["label"], "callback_data": f"set_{k}", "style": "success"}
+            elif has_sub:
+                btn = {"text": m["label"], "callback_data": f"set_{k}"}
+            else:
+                btn = {"text": "🔒 " + m["label"], "callback_data": f"set_{k}"}
+            row.append(btn)
+        rows.append(row)
+    rows.append([{"text": "◀️ Назад", "callback_data": "back_main"}])
+    return {"inline_keyboard": rows}
 
 
 def _modelcat_web_json(uid: int) -> dict:
-    """Raw-dict подменю веб-моделей."""
-    return _kb_to_json(_modelcat_web_kb(uid))
+    """Подменю веб-поиска — raw JSON."""
+    cur_mk  = get_model_key(uid)
+    has_sub = has_active_sub(uid)
+    web_keys = [k for k in _MODEL_WEB_KEYS if k in MODELS and k not in disabled_models]
+    rows = []
+    for k in web_keys:
+        m = MODELS[k]
+        is_active   = (k == cur_mk)
+        is_free_web = (k == _WEB_FREE_KEY)
+        if is_active:
+            btn: dict = {"text": "✅ " + m["label"], "callback_data": f"set_{k}", "style": "success"}
+        elif is_free_web or has_sub:
+            btn = {"text": m["label"], "callback_data": f"set_{k}"}
+        else:
+            btn = {"text": "🔒 " + m["label"], "callback_data": f"set_{k}"}
+        rows.append([btn])
+    rows.append([{"text": "◀️ Назад", "callback_data": "back_main"}])
+    return {"inline_keyboard": rows}
 
 
 # ------------------------------------------------------------------
@@ -19083,8 +19170,10 @@ def get_favorites_kb(uid: int) -> InlineKeyboardMarkup:
 
 
 @dp.callback_query(F.data == "menu_favorites")
-async def cb_favorites_menu(callback: CallbackQuery):
+async def cb_favorites_menu(callback: CallbackQuery, state: FSMContext):
     uid  = callback.from_user.id
+    # Сбрасываем FSM-состояние (например, «Отмена» при добавлении промпта)
+    await state.clear()
     favs = user_favorites.get(uid, [])
     if favs:
         count_str = f"У тебя <b>{len(favs)}/10</b> сохранённых промптов."
@@ -19359,7 +19448,6 @@ def get_favorites_kb(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@dp.callback_query(F.data == "menu_favorites")
 async def cb_favorites_menu(callback: CallbackQuery):
     uid  = callback.from_user.id
     favs = user_favorites.get(uid, [])
