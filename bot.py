@@ -19165,10 +19165,15 @@ def get_favorites_kb(uid: int) -> InlineKeyboardMarkup:
     for i, fav in enumerate(favs):
         rows.append([InlineKeyboardButton(
             text=fav["name"][:30],
-            callback_data=f"fav_use_{i}"
+            callback_data=f"fav_use_{i}",
+            icon_custom_emoji_id=PE["tag"]
         )])
     rows.append([
-        InlineKeyboardButton(text="➕ Добавить текущий промпт", callback_data="fav_add"),
+        InlineKeyboardButton(
+            text="Добавить промпт",
+            callback_data="fav_add",
+            icon_custom_emoji_id=PE["pencil"]
+        ),
     ])
     rows.append([
         InlineKeyboardButton(text="◁ Назад", callback_data="back_home"),
@@ -19207,8 +19212,8 @@ async def cb_fav_use(callback: CallbackQuery):
         return await callback.answer("❌ Промпт не найден", show_alert=True)
     fav = favs[idx]
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Отправить боту", callback_data=f"fav_send_{idx}")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"fav_del_{idx}")],
+        [InlineKeyboardButton(text="Отправить боту", callback_data=f"fav_send_{idx}", icon_custom_emoji_id=PE["upload"])],
+        [InlineKeyboardButton(text="Удалить", callback_data=f"fav_del_{idx}", icon_custom_emoji_id=PE["trash"])],
         [InlineKeyboardButton(text="◁ Назад", callback_data="menu_favorites")],
     ])
     text = (
@@ -19262,7 +19267,7 @@ async def cb_fav_send(callback: CallbackQuery):
 
 
 @dp.callback_query(F.data.startswith("fav_del_"))
-async def cb_fav_del(callback: CallbackQuery):
+async def cb_fav_del(callback: CallbackQuery, state: FSMContext):
     uid = callback.from_user.id
     idx = int(callback.data.replace("fav_del_", ""))
     favs = user_favorites.get(uid, [])
@@ -19271,7 +19276,7 @@ async def cb_fav_del(callback: CallbackQuery):
         user_favorites[uid] = favs
         asyncio.create_task(db_save_user(uid))
         await callback.answer(f"🗑 Удалено: {removed['name'][:20]}")
-    await cb_favorites_menu(callback)
+    await cb_favorites_menu(callback, state)
 
 
 @dp.callback_query(F.data == "fav_add")
@@ -19287,7 +19292,7 @@ async def cb_fav_add(callback: CallbackQuery, state: FSMContext):
         f'Потом бот спросит как его назвать.',
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="❌ Отмена", callback_data="menu_favorites")
+            InlineKeyboardButton(text="Отмена", callback_data="menu_favorites", icon_custom_emoji_id=PE["cross"])
         ]])
     )
     await state.set_state(FavStates.waiting_text)
@@ -19306,7 +19311,7 @@ async def fav_receive_text(message: Message, state: FSMContext):
         f'(до 30 символов)',
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="❌ Отмена", callback_data="menu_favorites")
+            InlineKeyboardButton(text="Отмена", callback_data="menu_favorites", icon_custom_emoji_id=PE["cross"])
         ]])
     )
 
@@ -19328,8 +19333,8 @@ async def fav_receive_name(message: Message, state: FSMContext):
         f'<tg-emoji emoji-id="{PE["check"]}">✅</tg-emoji> <b>Сохранено:</b> {name}',
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="⭐ Мои промпты", callback_data="menu_favorites"),
-            InlineKeyboardButton(text="🏠 Меню", callback_data="back_home"),
+            InlineKeyboardButton(text="Мои промпты", callback_data="menu_favorites", icon_custom_emoji_id=PE["tag"]),
+            InlineKeyboardButton(text="Меню", callback_data="back_home", icon_custom_emoji_id=PE["home"]),
         ]])
     )
 
@@ -19427,121 +19432,6 @@ async def inline_query_handler(inline_query: InlineQuery):
 
     await inline_query.answer(results, cache_time=30, is_personal=True)
 
-
-# ==================================================================
-# ⭐ ИЗБРАННЫЕ ПРОМПТЫ
-# ==================================================================
-
-def get_favorites_kb(uid: int) -> InlineKeyboardMarkup:
-    favs = user_favorites.get(uid, [])
-    rows = []
-    for i, fav in enumerate(favs):
-        rows.append([InlineKeyboardButton(
-            text=fav["name"][:30],
-            callback_data=f"fav_use_{i}"
-        )])
-    rows.append([
-        InlineKeyboardButton(text="➕ Добавить текущий промпт", callback_data="fav_add"),
-    ])
-    rows.append([
-        InlineKeyboardButton(text="◁ Назад", callback_data="back_home"),
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-async def cb_favorites_menu(callback: CallbackQuery):
-    uid  = callback.from_user.id
-    favs = user_favorites.get(uid, [])
-    if favs:
-        count_str = f"У тебя <b>{len(favs)}/10</b> сохранённых промптов."
-    else:
-        count_str = "У тебя пока нет сохранённых промптов."
-    text = (
-        f'<tg-emoji emoji-id="{PE["tag"]}">🏷</tg-emoji> <b>Избранные промпты</b>\n\n'
-        f'{count_str}\n\n'
-        f'Нажми на промпт чтобы отправить его боту.'
-    )
-    try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=get_favorites_kb(uid))
-    except Exception:
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=get_favorites_kb(uid))
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("fav_use_"))
-async def cb_fav_use(callback: CallbackQuery):
-    uid = callback.from_user.id
-    idx = int(callback.data.replace("fav_use_", ""))
-    favs = user_favorites.get(uid, [])
-    if idx >= len(favs):
-        return await callback.answer("❌ Промпт не найден", show_alert=True)
-    fav = favs[idx]
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Отправить боту", callback_data=f"fav_send_{idx}")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"fav_del_{idx}")],
-        [InlineKeyboardButton(text="◁ Назад", callback_data="menu_favorites")],
-    ])
-    text = (
-        f'<tg-emoji emoji-id="{PE["pencil"]}">✏</tg-emoji> <b>{fav["name"]}</b>\n\n'
-        f'<code>{fav["text"][:500]}</code>'
-    )
-    try:
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-    except Exception:
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("fav_send_"))
-async def cb_fav_send(callback: CallbackQuery):
-    uid = callback.from_user.id
-    idx = int(callback.data.replace("fav_send_", ""))
-    favs = user_favorites.get(uid, [])
-    if idx >= len(favs):
-        return await callback.answer("❌ Промпт не найден", show_alert=True)
-    fav_text = favs[idx]["text"]
-    await callback.answer("✅ Отправляю...")
-    await callback.message.answer(
-        f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> <i>Промпт отправлен:</i>\n<code>{fav_text[:200]}</code>',
-        parse_mode="HTML"
-    )
-    _init_limits(uid)
-    mk = resolve_model_key(uid, fav_text)
-    _ok, _ = can_send(uid, mk)
-    if not _ok:
-        await callback.message.answer("🚫 Лимит исчерпан. Попробуй позже.", parse_mode="HTML")
-        return
-    if uid not in user_memory:
-        user_memory[uid] = deque(maxlen=20)
-    user_memory[uid].append({"role": "user", "content": fav_text})
-    msgs = [{"role": "user", "content": fav_text}]
-    think = await callback.message.answer(
-        f'<tg-emoji emoji-id="{PE["loading"]}">🔄</tg-emoji> <i>Думаю...</i>', parse_mode="HTML"
-    )
-    try:
-        ans = await call_chat(msgs, mk)
-        user_memory[uid].append({"role": "assistant", "content": ans})
-        spend_limit(uid, mk)
-        last_responses[uid] = {"q": fav_text, "a": ans, "model_label": MODELS.get(mk, {}).get("label", "ИИ"), "model_key": mk}
-        await think.delete()
-        html_ans = md_to_html(ans)
-        await callback.message.answer(html_ans, parse_mode="HTML", reply_markup=save_kb(uid))
-    except Exception as e:
-        await think.delete()
-        await callback.message.answer(f"❌ Ошибка: {str(e)[:200]}")
-
-
-@dp.callback_query(F.data.startswith("fav_del_"))
-async def cb_fav_del(callback: CallbackQuery):
-    uid = callback.from_user.id
-    idx = int(callback.data.replace("fav_del_", ""))
-    favs = user_favorites.get(uid, [])
-    if idx < len(favs):
-        removed = favs.pop(idx)
-        user_favorites[uid] = favs
-        asyncio.create_task(db_save_user(uid))
-        await callback.answer(f"🗑 Удалено: {removed['name'][:20]}")
-    await cb_favorites_menu(callback)
 
 # ==================================================================
 # 📊 ГРАФИК АКТИВНОСТИ ПРОФИЛЯ
