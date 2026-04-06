@@ -75,8 +75,9 @@ from matplotlib import font_manager as fm
 from matplotlib.font_manager import FontProperties
 from aiogram import Bot, Dispatcher, F, BaseMiddleware
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import BotCommand, BotCommandScopeDefault, MenuButtonDefault, MenuButtonWebApp
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from typing import Callable, Dict, Any, Awaitable
 from aiogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton as AiogramInlineKeyboardButton,
@@ -1929,6 +1930,12 @@ class AntiSpamMiddleware(BaseMiddleware):
             return
 
         return await handler(event, data)
+
+
+# ── FSM-состояния для добавления избранного промпта ──
+class FavStates(StatesGroup):
+    waiting_text = State()
+    waiting_name = State()
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp  = Dispatcher()
@@ -14270,7 +14277,7 @@ async def menu_photofusion(callback: CallbackQuery):
 async def handle_text(message: Message, state: FSMContext):
     # ── FSM-приоритет: если пользователь в состоянии избранного — не обрабатываем текст ──
     _cur_state = await state.get_state()
-    if _cur_state in ("fav_waiting_text", "fav_waiting_name"):
+    if _cur_state in (FavStates.waiting_text.state, FavStates.waiting_name.state):
         return  # Передаём управление FSM-хендлерам
 
     uid = message.from_user.id
@@ -19283,20 +19290,17 @@ async def cb_fav_add(callback: CallbackQuery, state: FSMContext):
             InlineKeyboardButton(text="❌ Отмена", callback_data="menu_favorites")
         ]])
     )
-    await state.set_state("fav_waiting_text")
+    await state.set_state(FavStates.waiting_text)
 
 
-@dp.message(F.text, flags={"priority": 10})
+@dp.message(StateFilter(FavStates.waiting_text))
 async def fav_receive_text(message: Message, state: FSMContext):
-    current = await state.get_state()
-    if current != "fav_waiting_text":
-        return
     uid = message.from_user.id
     fav_text = (message.text or "").strip()
     if not fav_text:
         return await message.answer("❌ Пустой текст, попробуй снова.")
     await state.update_data(fav_text=fav_text)
-    await state.set_state("fav_waiting_name")
+    await state.set_state(FavStates.waiting_name)
     await message.answer(
         f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> Теперь напиши <b>название</b> для этого промпта\n'
         f'(до 30 символов)',
@@ -19307,11 +19311,8 @@ async def fav_receive_text(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text, flags={"priority": 10})
+@dp.message(StateFilter(FavStates.waiting_name))
 async def fav_receive_name(message: Message, state: FSMContext):
-    current = await state.get_state()
-    if current != "fav_waiting_name":
-        return
     uid  = message.from_user.id
     name = (message.text or "").strip()[:30]
     if not name:
