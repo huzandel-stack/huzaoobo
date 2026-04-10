@@ -1142,6 +1142,19 @@ last_photo      = {}
 user_photo_mode = {}
 _start_cooldown: dict = {}  # uid -> timestamp последнего /start
 
+# ── Буферизация пакетов фото ──────────────────────────────────
+class PhotoInfo:
+    """Контейнер для информации о одном фото в пакете."""
+    def __init__(self, file_id: str, img_b64: str, tg_file_path: str):
+        self.file_id = file_id
+        self.img_b64 = img_b64
+        self.tg_file_path = tg_file_path
+
+photo_buffers: dict = {}          # uid -> {"media_group_id": str, "photos": [PhotoInfo, ...], "timestamp": float}
+photo_buffer_timers: dict = {}    # uid -> asyncio.Task
+current_packet_mode: dict = {}    # uid -> режим обработки пакета
+PHOTO_BUFFER_TIMEOUT = 2.0        # сек ожидания перед обработкой пакета
+
 user_referrals    = {}
 REF_BONUS_INVITER = 5
 REF_BONUS_NEW     = 10
@@ -1235,6 +1248,54 @@ def resolve_model_key(uid: int, text: str = "", has_image: bool = False, has_doc
         resolved, _ = auto_select_model(text=text, has_image=has_image, has_doc=has_doc)
         return resolved
     return mk
+
+# ── Выбор бесплатных vision-моделей для фото ──────────────────
+def get_free_vision_model() -> str:
+    """Возвращает первую доступную БЕСПЛАТНУЮ vision-модель."""
+    FREE_VISION = [
+        "claude_haiku",
+        "gemini_25_flash",
+        "gemini_3_flash",
+        "gemini_20_flash",
+    ]
+    for model in FREE_VISION:
+        if model in MODELS and model not in disabled_models:
+            return model
+    # Absolute fallback
+    return "claude_haiku"
+
+def select_vision_for_photo(uid: int) -> str:
+    """
+    Выбирает vision-модель для анализа фото с учётом подписки.
+    Для free users: только бесплатные модели.
+    Для подписанных: выбранная модель или fallback на платные.
+    """
+    has_sub = has_active_sub(uid)
+    cur_key = get_model_key(uid)
+    
+    # Бесплатные vision-модели
+    FREE_VISION = ["claude_haiku", "gemini_25_flash", "gemini_3_flash", "gemini_20_flash"]
+    
+    if not has_sub:
+        # Нет подписки → только БЕСПЛАТНЫЕ vision-модели
+        for model in FREE_VISION:
+            if model in MODELS and model not in disabled_models and MODELS[model].get("vision"):
+                return model
+        return get_free_vision_model()
+    
+    # Есть подписка
+    if cur_key in VISION_MODELS and cur_key not in disabled_models:
+        # Текущая модель уже vision → используем её
+        return cur_key
+    
+    # Текущая модель не vision → выбираем vision автоматически
+    # Приоритет: платные → бесплатные
+    for model in ["claude_sonnet", "claude_opus", "gpt52", "qwen3_vl"]:
+        if model in MODELS and model not in disabled_models and model in VISION_MODELS:
+            return model
+    
+    # Fallback на бесплатные
+    return get_free_vision_model()
 
 promo_codes = {}
 promo_used  = {}
@@ -2193,6 +2254,10 @@ class Paginator:
 class FavStates(StatesGroup):
     waiting_text = State()
     waiting_name = State()
+
+# ── FSM-состояния для обработки пакета фото ──
+class PhotoPackStates(StatesGroup):
+    waiting_mode = State()  # Ожидание выбора режима обработки пакета фото
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp  = Dispatcher()
@@ -17366,6 +17431,406 @@ async def _do_img2img(message: Message, uid: int, img_b64: str, tg_file_path: st
         await message.answer(f"❌ <b>Ошибка генерации:</b> {str(e)[:200]}", parse_mode="HTML")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 📦 ПАКЕТНАЯ ОБРАБОТКА  ФОТО
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def buffer_photo_packet(uid: int, message: Message, photo_info: PhotoInfo, media_group_id: str | None):
+    """
+    Буферизирует одно фото в пакет.
+    Если это первое фото пакета или первое фото без альбома — запускает таймер.
+    """
+    import time
+    
+    # Если нет media_group_id (одиночное фото) — используем uid+timestamp как identifier
+    buffer_id = media_group_id or f"{uid}_{int(time.time() * 1000)}"
+    
+    # Инициализируем буфер для этого пакета
+    if uid not in photo_buffers:
+        photo_buffers[uid] = {}
+    
+    if buffer_id not in photo_buffers[uid]:
+        photo_buffers[uid][buffer_id] = {
+            "photos": [],
+            "timestamp": time.time(),
+            "message": message,
+            "media_group_id": media_group_id,
+        }
+    
+    # Добавляем фото в буфер
+    photo_buffers[uid][buffer_id]["photos"].append(photo_info)
+    
+    # Если это первое фото пакета — запускаем таймер ожидания
+    if len(photo_buffers[uid][buffer_id]["photos"]) == 1:
+        # Отменяем старый таймер если был
+        if uid in photo_buffer_timers and photo_buffer_timers[uid]:
+            try:
+                photo_buffer_timers[uid].cancel()
+            except:
+                pass
+        
+        # Функция-таймер
+        async def wait_and_process():
+            await asyncio.sleep(PHOTO_BUFFER_TIMEOUT)
+            if uid in photo_buffers and buffer_id in photo_buffers[uid]:
+                await process_photo_packet(uid, buffer_id)
+        
+        # Запускаем таймер
+        task = asyncio.create_task(wait_and_process())
+        photo_buffer_timers[uid] = task
+    
+    # Показываем индикатор ожидания
+    photo_count = len(photo_buffers[uid][buffer_id]["photos"])
+    status_text = f"📸 Буферизирую фото... Получено: {photo_count}"
+    
+    try:
+        await message.answer(status_text, parse_mode="HTML")
+    except:
+        pass
+
+
+async def process_photo_packet(uid: int, buffer_id: str):
+    """
+    Обрабатывает пакет фото: выясняет кол-во и показывает меню с режимами обработки.
+    """
+    if uid not in photo_buffers or buffer_id not in photo_buffers[uid]:
+        return
+    
+    packet = photo_buffers[uid][buffer_id]
+    photos = packet["photos"]
+    message = packet["message"]
+    
+    if not photos:
+        return
+    
+    photo_count = len(photos)
+    
+    # Очищаем таймер
+    if uid in photo_buffer_timers:
+        try:
+            photo_buffer_timers[uid].cancel()
+        except:
+            pass
+        photo_buffer_timers.pop(uid, None)
+    
+    # Показываем меню с режимами обработки
+    await send_photo_packet_menu(message, uid, buffer_id, photo_count, photos)
+
+
+async def send_photo_packet_menu(message: Message, uid: int, buffer_id: str, photo_count: int, photos: list):
+    """
+    Показывает меню с режимами обработки пакета фото.
+    """
+    text = (
+        f"📸 <b>Пакет фото получен!</b>\n\n"
+        f"Количество фото: <b>{photo_count}</b>\n\n"
+        f"<b>Что сделать?</b>\n"
+    )
+    
+    buttons = []
+    
+    # Режим 1: Анализ (базовый)
+    buttons.append([
+        InlineKeyboardButton(
+            text="🔍 Анализ каждого",
+            callback_data=f"photo_packet_analyze_{buffer_id}"
+        )
+    ])
+    
+    # Режим 2: Сравнение (только если 2+ фото)
+    if photo_count >= 2:
+        buttons.append([
+            InlineKeyboardButton(
+                text="⚖️ Сравнение",
+                callback_data=f"photo_packet_compare_{buffer_id}"
+            )
+        ])
+        buttons.append([
+            InlineKeyboardButton(
+                text="🔎 Найти различия",
+                callback_data=f"photo_packet_diff_{buffer_id}"
+            )
+        ])
+    
+    # Режим 3: Текст/OCR
+    buttons.append([
+        InlineKeyboardButton(
+            text="📝 Извлечь текст",
+            callback_data=f"photo_packet_text_{buffer_id}"
+        )
+    ])
+    
+    # Режим 4: Детальный анализ
+    buttons.append([
+        InlineKeyboardButton(
+            text="🧐 Подробный анализ",
+            callback_data=f"photo_packet_detailed_{buffer_id}"
+        )
+    ])
+    
+    # Отмена
+    buttons.append([
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data=f"photo_packet_cancel_{buffer_id}"
+        )
+    ])
+    
+    try:
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+    except Exception as e:
+        logging.error(f"send_photo_packet_menu error: {e}")
+
+
+async def analyze_photo_packet_batch(message: Message, uid: int, buffer_id: str, mode: str = "analyze"):
+    """
+    Анализирует пакет фото в выбранном режиме.
+    mode: "analyze" → каждое отдельно
+          "compare" → сравнение друг с другом
+          "text" → извлечение текста
+          "detailed" → подробный анализ каждого
+          "diff" → поиск различий
+    """
+    if uid not in photo_buffers or buffer_id not in photo_buffers[uid]:
+        await message.answer("❌ Пакет фото не найден.", parse_mode="HTML")
+        return
+    
+    packet = photo_buffers[uid][buffer_id]
+    photos = packet["photos"]
+    
+    if not photos:
+        await message.answer("❌ В пакете нет фото.", parse_mode="HTML")
+        return
+    
+    # Проверяем лимиты
+    cur_key = get_model_key(uid)
+    vision_key = select_vision_for_photo(uid)
+    
+    # Для бесплатных пользователей используем бесплатную vision-модель
+    if not has_active_sub(uid):
+        vision_key = get_free_vision_model()
+    
+    # Показываем индикатор обработки
+    wait_msg = await message.answer(
+        f"⏳ <i>Обрабатываю пакет из {len(photos)} фото...</i>\n"
+        f"🤖 Модель: <code>{MODELS.get(vision_key, {}).get('label', vision_key)}</code>",
+        parse_mode="HTML"
+    )
+    
+    try:
+        if mode == "text":
+            # Режим OCR/извлечения текста
+            result = await extract_text_from_photos_batch(photos, vision_key, uid)
+        elif mode == "compare":
+            # Режим сравнения
+            result = await compare_photos_batch(message, photos, vision_key, uid)
+        elif mode == "diff":
+            # Режим поиска различий
+            result = await find_photo_differences_batch(message, photos, vision_key, uid)
+        elif mode == "detailed":
+            # Режим подробного анализа каждого
+            result = await analyze_photos_detailed_batch(message, photos[0], vision_key, uid)
+            # Для каждого фото — отдельный анализ
+            for i, photo in enumerate(photos[1:], 2):
+                await asyncio.sleep(1)  # небольшая пауза
+                result_next = await analyze_photos_detailed_batch(message, photo, vision_key, uid)
+            return  # результаты уже отправлены
+        else:  # "analyze"
+            # Стандартный анализ каждого фото
+            result = ""
+            for i, photo in enumerate(photos, 1):
+                await asyncio.sleep(0.5)  # пауза чтобы не спамить API
+                ans = await analyze_single_photo_batch(message, photo, vision_key, uid)
+                result += f"<b>Фото {i}:</b>\n{ans}\n\n"
+        
+        # Удаляем сообщение "обработка"
+        try:
+            await wait_msg.delete()
+        except:
+            pass
+        
+        # Отправляем результат
+        if result:
+            try:
+                await message.answer(
+                    result[:3800],
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text="❌ Закрыть", callback_data=f"photo_packet_close_{buffer_id}")
+                    ]])
+                )
+            except:
+                # Если HTML не работает — отправляем как текст
+                await message.answer(result[:3800])
+        
+        # Очищаем буфер
+        photo_buffers[uid].pop(buffer_id, None)
+        
+    except Exception as e:
+        try:
+            await wait_msg.delete()
+        except:
+            pass
+        logging.error(f"analyze_photo_packet_batch error: {e}")
+        await message.answer(f"❌ Ошибка обработки: {str(e)[:150]}", parse_mode="HTML")
+
+
+async def analyze_single_photo_batch(message: Message, photo: PhotoInfo, vision_key: str, uid: int) -> str:
+    """Анализирует одно фото через vision-модель."""
+    try:
+        vision_msg = [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{photo.img_b64}"}},
+                {"type": "text", "text": "Что изображено на этом фото? Опиши подробно."},
+            ]
+        }]
+        ans = await call_chat(vision_msg, vision_key, max_tokens=2000)
+        spend_limit(uid, vision_key)
+        return ans[:1500]
+    except Exception as e:
+        logging.error(f"analyze_single_photo_batch: {e}")
+        return f"⚠️ Ошибка анализа: {str(e)[:100]}"
+
+
+async def analyze_photos_detailed_batch(message: Message, photo: PhotoInfo, vision_key: str, uid: int):
+    """Подробный анализ одного фото с отправкой результата."""
+    try:
+        vision_prompt = (
+            "Подробный анализ фото:\n"
+            "1. Что изображено (предметы, люди, природа, etc)\n"
+            "2. Композиция (расположение элементов)\n"
+            "3. Цвета и стиль\n"
+            "4. Текст если есть\n"
+            "5. Эмоциональный контекст\n"
+            "6. Качество и технические особенности"
+        )
+        vision_msg = [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{photo.img_b64}"}},
+                {"type": "text", "text": vision_prompt},
+            ]
+        }]
+        ans = await call_chat(vision_msg, vision_key, max_tokens=2500)
+        spend_limit(uid, vision_key)
+        
+        header = f"🧐 <b>Подробный анализ</b>\n\n{MODELS.get(vision_key, {}).get('label', vision_key)}\n\n"
+        html_ans = md_to_html(ans)
+        try:
+            await message.answer(header + html_ans[:3800], parse_mode="HTML")
+        except:
+            await message.answer(header + ans[:3800])
+    except Exception as e:
+        logging.error(f"analyze_photos_detailed_batch: {e}")
+        await message.answer(f"❌ Ошибка анализа: {str(e)[:150]}", parse_mode="HTML")
+
+
+async def compare_photos_batch(message: Message, photos: list, vision_key: str, uid: int) -> str:
+    """Сравнивает несколько фото между собой."""
+    try:
+        if len(photos) < 2:
+            return "⚠️ Для сравнения нужно минимум 2 фото."
+        
+        # Составляем промпт сравнения
+        compare_prompt = (
+            "Сравни эти фото:\n"
+            "1. Что общего (сходства)\n"
+            "2. В чём различия (разные элементы, цвета, композиция)\n"
+            "3. Какое из фото качественнее и почему\n"
+            "4. Если это одна сцена в разное время/угол — опиши изменения\n"
+            "Структурируй ответ для ясности"
+        )
+        
+        content = [{"type": "text", "text": compare_prompt}]
+        for i, photo in enumerate(photos[:4], 1):  # макс 4 фото для сравнения
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{photo.img_b64}"}
+            })
+        
+        vision_msg = [{"role": "user", "content": content}]
+        ans = await call_chat(vision_msg, vision_key, max_tokens=2500)
+        spend_limit(uid, vision_key)
+        return f"⚖️ <b>Сравнение ({len(photos)} фото)</b>\n\n{ans[:2500]}"
+    except Exception as e:
+        logging.error(f"compare_photos_batch: {e}")
+        return f"❌ Ошибка сравнения: {str(e)[:150]}"
+
+
+async def find_photo_differences_batch(message: Message, photos: list, vision_key: str, uid: int) -> str:
+    """Находит различия между фото."""
+    try:
+        if len(photos) < 2:
+            return "⚠️ Для поиска различий нужно минимум 2 фото."
+        
+        find_prompt = (
+            "Внимательно найди все различия между фото:\n"
+            "1. Список всех различий (пронумеруй)\n"
+            "2. Какие элементы убраны/добавлены/изменены\n"
+            "3. Где на фото находятся эти различия (верх/низ/левая/правая часть)\n"
+            "4. Оцени сложность поиска различий (легко/средне/сложно)\n"
+            "Будь максимально внимателен к деталям!"
+        )
+        
+        content = [{"type": "text", "text": find_prompt}]
+        for i, photo in enumerate(photos[:4], 1):
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{photo.img_b64}"}
+            })
+        
+        vision_msg = [{"role": "user", "content": content}]
+        ans = await call_chat(vision_msg, vision_key, max_tokens=2500)
+        spend_limit(uid, vision_key)
+        return f"🔎 <b>Различия между фото</b>\n\n{ans[:2500]}"
+    except Exception as e:
+        logging.error(f"find_photo_differences_batch: {e}")
+        return f"❌ Ошибка: {str(e)[:150]}"
+
+
+async def extract_text_from_photos_batch(photos: list, vision_key: str, uid: int) -> str:
+    """Извлекает цифры и текст из всех фото в пакете."""
+    try:
+        text_prompt = (
+            "Извлеки ВСЕ видимые тексты, цифры и надписи с этого фото:\n"
+            "1. Перепиши текст точно как видно\n"
+            "2. Сохрани оригинальное форматирование\n"
+            "3. Отметь ориентацию текста (если перевёрнутый или диагональный)\n"
+            "4. Если текст на иностранном языке — скажи какой\n"
+            "5. Оцени читаемость (чёткий/размытый/частично видимый)\n"
+            "Если текста нет — напиши 'Текста не обнаружено'"
+        )
+        
+        all_texts = []
+        for i, photo in enumerate(photos, 1):
+            try:
+                content = [
+                    {"type": "text", "text": text_prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{photo.img_b64}"}
+                    }
+                ]
+                vision_msg = [{"role": "user", "content": content}]
+                ans = await call_chat(vision_msg, vision_key, max_tokens=1500)
+                spend_limit(uid, vision_key)
+                all_texts.append(f"<b>Фото {i}:</b>\n{ans}\n")
+            except Exception as e:
+                all_texts.append(f"<b>Фото {i}:</b> ⚠️ Ошибка: {str(e)[:80]}\n")
+                continue
+        
+        result = "📝 <b>Извлечённый текст</b>\n\n" + "\n".join(all_texts)
+        return result[:3800]
+    except Exception as e:
+        logging.error(f"extract_text_from_photos_batch: {e}")
+        return f"❌ Ошибка извлечения текста: {str(e)[:150]}"
+
+
 @dp.message(F.photo)
 async def handle_photo(message: Message):
     uid = message.from_user.id
@@ -17380,7 +17845,67 @@ async def handle_photo(message: Message):
     tg_file_path = file_obj.file_path  # путь для Telegram CDN URL
     user_caption = message.caption or ""
 
-    # ── Режим img2img через выбор модели из меню ─────────────────
+    # ════════════════════════════════════════════════════════════════════
+    # 📦 БУФЕРИЗАЦИЯ ПАКЕТОВ ФОТО (новая система)
+    # ════════════════════════════════════════════════════════════════════
+    # Проверяем, нет ли активных "пендинг"-состояний, которые требуют одного фото
+    _pending = last_photo.get(uid, {})
+    _video_state = video_states.get(uid, {})
+    _has_pending_request = (
+        _pending.get("img2img_model_pending") or 
+        _pending.get("img2img_pending") or
+        _pending.get("fusion_pending") or
+        _pending.get("ask_pending") or
+        _video_state.get("stage") in ["await_photo", "await_video_prompt", "await_prompt"]
+    )
+    
+    # Если НЕТУ пендинг-состояний → буферизируем фото в пакет
+    if not _has_pending_request:
+        # Получаем media_group_id из сообщения (есть только у фото из альбома)
+        media_group_id = message.media_group_id
+        
+        # Создаём объект фото для буфера
+        photo_info = PhotoInfo(
+            file_id=message.photo[-1].file_id,
+            img_b64=img_b64,
+            tg_file_path=tg_file_path
+        )
+        
+        # Если есть caption — значит это последнее фото в альбоме или одиночное
+        # В этом случае отменяем таймер и сразу обрабатываем
+        if user_caption.strip():
+            # Если таймер был запущен — отменяем его
+            if uid in photo_buffer_timers and photo_buffer_timers[uid]:
+                try:
+                    photo_buffer_timers[uid].cancel()
+                except:
+                    pass
+                photo_buffer_timers.pop(uid, None)
+            
+            # Обработаем пакет с caption как инструкцией
+            current_packet_mode[uid] = "analyze"
+            # TODO: можем добавить логику парсинга caption'а для режима
+        
+        # Буферизируем фото
+        await buffer_photo_packet(uid, message, photo_info, media_group_id)
+        
+        # Если есть caption или нет media_group_id — обрабатываем сразу после буфера
+        if user_caption.strip() or media_group_id is None:
+            await asyncio.sleep(PHOTO_BUFFER_TIMEOUT + 0.5)
+            
+            # Если в буфере есть пакет — обрабатываем его
+            if uid in photo_buffers:
+                for buffer_id, packet in list(photo_buffers[uid].items()):
+                    if packet["media_group_id"] == media_group_id or (media_group_id is None):
+                        # После таймаута показываем меню выбора режима
+                        await process_photo_packet(uid, buffer_id)
+                        break
+        
+        return
+
+    # ════════════════════════════════════════════════════════════════════
+    # ── РЕЖИМ img2img через выбор модели из меню ─────────────────────
+    # ════════════════════════════════════════════════════════════════════
     _pending = last_photo.get(uid, {})
     if _pending.get("img2img_model_pending"):
         chosen_key = _pending["img2img_model_pending"]
@@ -20140,6 +20665,89 @@ async def inline_query_handler(inline_query: InlineQuery):
         ]
 
     await inline_query.answer(results, cache_time=30, is_personal=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 📦 CALLBACK-ОБРАБОТЧИКИ ДЛЯ ПАКЕТА ФОТ
+# ═══════════════════════════════════════════════════════════════════════════
+
+@dp.callback_query(F.data.startswith("photo_packet_analyze_"))
+async def photo_packet_analyze_cb(callback: CallbackQuery):
+    """Обработчик нажатия на кнопку 'Анализ'."""
+    buffer_id = callback.data.split("photo_packet_analyze_")[1]
+    uid = callback.from_user.id
+    await callback.answer("🔍 Анализирую фото...", show_alert=False)
+    await analyze_photo_packet_batch(callback.message, uid, buffer_id, mode="analyze")
+
+
+@dp.callback_query(F.data.startswith("photo_packet_compare_"))
+async def photo_packet_compare_cb(callback: CallbackQuery):
+    """Обработчик нажатия на кнопку 'Сравнение'."""
+    buffer_id = callback.data.split("photo_packet_compare_")[1]
+    uid = callback.from_user.id
+    await callback.answer("⚖️ Сравниваю фото...", show_alert=False)
+    await analyze_photo_packet_batch(callback.message, uid, buffer_id, mode="compare")
+
+
+@dp.callback_query(F.data.startswith("photo_packet_diff_"))
+async def photo_packet_diff_cb(callback: CallbackQuery):
+    """Обработчик нажатия на кнопку 'Найти различия'."""
+    buffer_id = callback.data.split("photo_packet_diff_")[1]
+    uid = callback.from_user.id
+    await callback.answer("🔎 Ищу различия...", show_alert=False)
+    await analyze_photo_packet_batch(callback.message, uid, buffer_id, mode="diff")
+
+
+@dp.callback_query(F.data.startswith("photo_packet_text_"))
+async def photo_packet_text_cb(callback: CallbackQuery):
+    """Обработчик нажатия на кнопку 'Извлечь текст'."""
+    buffer_id = callback.data.split("photo_packet_text_")[1]
+    uid = callback.from_user.id
+    await callback.answer("📝 Извлекаю текст...", show_alert=False)
+    await analyze_photo_packet_batch(callback.message, uid, buffer_id, mode="text")
+
+
+@dp.callback_query(F.data.startswith("photo_packet_detailed_"))
+async def photo_packet_detailed_cb(callback: CallbackQuery):
+    """Обработчик нажатия на кнопку 'Подробный анализ'."""
+    buffer_id = callback.data.split("photo_packet_detailed_")[1]
+    uid = callback.from_user.id
+    await callback.answer("🧐 Провожу подробный анализ...", show_alert=False)
+    await analyze_photo_packet_batch(callback.message, uid, buffer_id, mode="detailed")
+
+
+@dp.callback_query(F.data.startswith("photo_packet_cancel_"))
+async def photo_packet_cancel_cb(callback: CallbackQuery):
+    """Обработчик нажатия на кнопку 'Отмена'."""
+    buffer_id = callback.data.split("photo_packet_cancel_")[1]
+    uid = callback.from_user.id
+    
+    # Удаляем пакет из буфера
+    if uid in photo_buffers:
+        photo_buffers[uid].pop(buffer_id, None)
+    
+    await callback.answer("❌ Отмена", show_alert=False)
+    try:
+        await callback.message.delete()
+    except:
+        pass
+
+
+@dp.callback_query(F.data.startswith("photo_packet_close_"))
+async def photo_packet_close_cb(callback: CallbackQuery):
+    """Обработчик закрытия результатов пакета."""
+    buffer_id = callback.data.split("photo_packet_close_")[1]
+    uid = callback.from_user.id
+    
+    # Удаляем пакет из буфера
+    if uid in photo_buffers:
+        photo_buffers[uid].pop(buffer_id, None)
+    
+    await callback.answer()
+    try:
+        await callback.message.delete()
+    except:
+        pass
 
 
 async def main():
