@@ -1144,16 +1144,58 @@ _start_cooldown: dict = {}  # uid -> timestamp последнего /start
 
 # ── Буферизация пакетов фото ──────────────────────────────────
 class PhotoInfo:
-    """Контейнер для информации о одном фото в пакете."""
-    def __init__(self, file_id: str, img_b64: str, tg_file_path: str):
-        self.file_id = file_id
-        self.img_b64 = img_b64
-        self.tg_file_path = tg_file_path
+    """Контейнер для информации о фото. Совместим со старым и новым форматом вызова."""
 
-photo_buffers: dict = {}          # uid -> {"media_group_id": str, "photos": [PhotoInfo, ...], "timestamp": float}
-photo_buffer_timers: dict = {}    # uid -> asyncio.Task
-current_packet_mode: dict = {}    # uid -> режим обработки пакета
-PHOTO_BUFFER_TIMEOUT = 2.0        # сек ожидания перед обработкой пакета
+    __slots__ = ("file_id", "img_b64", "tg_file_path", "file_unique_id", "width", "height")
+
+    def __init__(self, *args, **kwargs):
+        file_id = kwargs.pop("file_id", None)
+        img_b64 = kwargs.pop("img_b64", None)
+        tg_file_path = kwargs.pop("tg_file_path", None)
+        file_unique_id = kwargs.pop("file_unique_id", None)
+        width = kwargs.pop("width", None)
+        height = kwargs.pop("height", None)
+
+        if args:
+            if file_id is None:
+                file_id = args[0]
+            legacy_args = list(args[1:])
+            if legacy_args:
+                # Старый формат: PhotoInfo(file_id, file_unique_id, width, height)
+                if img_b64 is None and len(legacy_args) >= 3 and isinstance(legacy_args[1], int) and isinstance(legacy_args[2], int):
+                    file_unique_id = file_unique_id or legacy_args[0]
+                    width = width if width is not None else legacy_args[1]
+                    height = height if height is not None else legacy_args[2]
+                else:
+                    if img_b64 is None:
+                        img_b64 = legacy_args[0]
+                    if len(legacy_args) > 1 and tg_file_path is None:
+                        tg_file_path = legacy_args[1]
+                    if len(legacy_args) > 2 and file_unique_id is None:
+                        file_unique_id = legacy_args[2]
+                    if len(legacy_args) > 3 and width is None:
+                        width = legacy_args[3]
+                    if len(legacy_args) > 4 and height is None:
+                        height = legacy_args[4]
+
+        img_b64 = img_b64 if img_b64 is not None else kwargs.pop("image_b64", None)
+        tg_file_path = tg_file_path if tg_file_path is not None else kwargs.pop("telegram_file_path", "")
+
+        self.file_id = file_id or ""
+        self.img_b64 = img_b64
+        self.tg_file_path = tg_file_path or ""
+        self.file_unique_id = file_unique_id or self.file_id
+        self.width = int(width or 0)
+        self.height = int(height or 0)
+
+
+photo_batches: dict[int, dict[str, dict[str, Any]]] = {}     # uid -> batch_id -> packet
+photo_buffers = photo_batches                                 # alias для старого кода
+photo_buffer_timers: dict[tuple[int, str], asyncio.Task] = {} # (uid, batch_id) -> timer
+photo_batch_last_single: dict[int, str] = {}                  # uid -> batch_id последней одиночной пачки
+current_packet_mode: dict = {}                                # uid -> режим обработки пакета
+PHOTO_BUFFER_TIMEOUT = float(os.getenv("PHOTO_BUFFER_TIMEOUT", "1.5"))
+PHOTO_BATCH_MAX_PHOTOS = int(os.getenv("PHOTO_BATCH_MAX_PHOTOS", "8"))
 
 user_referrals    = {}
 REF_BONUS_INVITER = 5
@@ -1252,17 +1294,68 @@ def resolve_model_key(uid: int, text: str = "", has_image: bool = False, has_doc
 # ── Выбор бесплатных vision-моделей для фото ──────────────────
 def get_free_vision_model() -> str:
     """Возвращает первую доступную БЕСПЛАТНУЮ vision-модель."""
-    FREE_VISION = [
-        "claude_haiku",
-        "gemini_25_flash",
-        "gemini_3_flash",
-        "gemini_20_flash",
-    ]
-    for model in FREE_VISION:
+    for model in ["claude_haiku", "gemini_25_flash", "gemini_3_flash", "gemini_20_flash"]:
         if model in MODELS and model not in disabled_models:
             return model
     # Absolute fallback
     return "claude_haiku"
+
+
+def get_photo_vision_candidates(uid: int) -> list[str]:
+    """Возвращает порядок vision-моделей с учётом auto/free/premium."""
+    free_candidates = [
+        model for model in ["claude_haiku", "gemini_25_flash", "gemini_3_flash", "gemini_20_flash"]
+        if model in MODELS and model not in disabled_models and MODELS[model].get("vision")
+    ]
+    paid_candidates = [
+        model for model in [
+            "claude_sonnet", "claude_opus", "gpt52", "qwen3_vl",
+            "c4ai_vis32b", "command_vision", "gemini_25_pro", "gemini_3_pro"
+        ]
+        if model in MODELS and model not in disabled_models and MODELS[model].get("vision")
+    ]
+
+    cur_key = get_model_key(uid)
+
+    if not has_active_sub(uid):
+        if cur_key in free_candidates:
+            return [cur_key] + [model for model in free_candidates if model != cur_key]
+        return free_candidates or [get_free_vision_model()]
+
+    if cur_key in VISION_MODELS and cur_key not in disabled_models:
+        ordered = [cur_key] + [model for model in paid_candidates + free_candidates if model != cur_key]
+        return ordered
+
+    ordered = paid_candidates + [model for model in free_candidates if model not in paid_candidates]
+    return ordered or [get_free_vision_model()]
+
+
+async def call_vision_with_fallback(
+    uid: int,
+    messages: list[dict],
+    *,
+    max_tokens: int,
+    vision_order: list[str] | None = None,
+) -> tuple[str, str, list[str]]:
+    """Пробует vision-модели по порядку и возвращает (answer, used_model, errors)."""
+    candidates = list(vision_order or get_photo_vision_candidates(uid))
+    errors: list[str] = []
+
+    if not candidates:
+        raise RuntimeError("Нет доступных vision-моделей")
+
+    for model_key in candidates:
+        try:
+            answer = await call_chat(messages, model_key, max_tokens=max_tokens)
+            spend_limit(uid, model_key)
+            return answer, model_key, errors
+        except Exception as e:
+            err = f"{model_key}: {str(e)[:120]}"
+            errors.append(err)
+            logging.warning(f"[vision-fallback] uid={uid} model={model_key} failed: {e}")
+
+    raise RuntimeError(" | ".join(errors) if errors else "Все vision-модели недоступны")
+
 
 def select_vision_for_photo(uid: int) -> str:
     """
@@ -1270,32 +1363,7 @@ def select_vision_for_photo(uid: int) -> str:
     Для free users: только бесплатные модели.
     Для подписанных: выбранная модель или fallback на платные.
     """
-    has_sub = has_active_sub(uid)
-    cur_key = get_model_key(uid)
-    
-    # Бесплатные vision-модели
-    FREE_VISION = ["claude_haiku", "gemini_25_flash", "gemini_3_flash", "gemini_20_flash"]
-    
-    if not has_sub:
-        # Нет подписки → только БЕСПЛАТНЫЕ vision-модели
-        for model in FREE_VISION:
-            if model in MODELS and model not in disabled_models and MODELS[model].get("vision"):
-                return model
-        return get_free_vision_model()
-    
-    # Есть подписка
-    if cur_key in VISION_MODELS and cur_key not in disabled_models:
-        # Текущая модель уже vision → используем её
-        return cur_key
-    
-    # Текущая модель не vision → выбираем vision автоматически
-    # Приоритет: платные → бесплатные
-    for model in ["claude_sonnet", "claude_opus", "gpt52", "qwen3_vl"]:
-        if model in MODELS and model not in disabled_models and model in VISION_MODELS:
-            return model
-    
-    # Fallback на бесплатные
-    return get_free_vision_model()
+    return get_photo_vision_candidates(uid)[0]
 
 promo_codes = {}
 promo_used  = {}
@@ -2192,40 +2260,12 @@ def is_task_cancelled(uid: int, task_id: str) -> bool:
 # 📸 BATCH PHOTO BUFFERING SYSTEM
 # ══════════════════════════════════════════════════════════════════════
 
-photo_buffer: dict = {}  # uid -> {media_group_id -> [PhotoInfo]}
-photo_buffer_timers: dict = {}  # uid -> asyncio.Task
-PHOTO_BUFFER_TIMEOUT = 2.0  # секунды
-
-class PhotoInfo:
-    """Информация о фото в буфере"""
-    def __init__(self, file_id: str, file_unique_id: str, width: int, height: int):
-        self.file_id = file_id
-        self.file_unique_id = file_unique_id
-        self.width = width
-        self.height = height
+# Legacy aliases: старый код ниже ещё может обращаться к этим именам.
+photo_buffer = photo_batches
 
 async def buffer_photo(uid: int, media_group_id: str, photo_info: PhotoInfo):
-    """Добавляет фото в буфер для пакетной обработки."""
-    if uid not in photo_buffer:
-        photo_buffer[uid] = {}
-    if media_group_id not in photo_buffer[uid]:
-        photo_buffer[uid][media_group_id] = []
-    
-    photo_buffer[uid][media_group_id].append(photo_info)
-    
-    # Если уже есть таймер — отмени старый
-    if uid in photo_buffer_timers:
-        photo_buffer_timers[uid].cancel()
-    
-    # Запусти таймер на 2 секунды (группировка)
-    async def timeout_handler():
-        await asyncio.sleep(PHOTO_BUFFER_TIMEOUT)
-        if uid in photo_buffer and media_group_id in photo_buffer[uid]:
-            photos = photo_buffer[uid].pop(media_group_id)
-            logging.info(f"Batch processing {len(photos)} photos from {uid}")
-            # Обработка будет вызвана из хендлера сообщения
-    
-    photo_buffer_timers[uid] = asyncio.create_task(timeout_handler())
+    """Совместимый wrapper поверх новой пакетной буферизации."""
+    await buffer_photo_packet(uid, None, photo_info, media_group_id)  # type: ignore[arg-type]
 
 # ══════════════════════════════════════════════════════════════════════
 # 🔄 PAGINATION HELPERS
@@ -2261,6 +2301,8 @@ class PhotoPackStates(StatesGroup):
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp  = Dispatcher()
+api_runner: aiohttp_web.AppRunner | None = None
+background_tasks: list[asyncio.Task] = []
 
 # Кулдаун на уведомления о лимите (uid → timestamp) — не спамим чаще раза в 5 минут
 _limit_notify_cd: dict = {}
@@ -2285,6 +2327,21 @@ def safe_task(coro):
             return loop.create_task(_wrapper())
     except RuntimeError:
         pass
+
+
+def track_background_task(task: asyncio.Task | None):
+    if task is None:
+        return None
+    background_tasks.append(task)
+
+    def _discard(done_task: asyncio.Task):
+        try:
+            background_tasks.remove(done_task)
+        except ValueError:
+            pass
+
+    task.add_done_callback(_discard)
+    return task
 
 
 
@@ -17435,95 +17492,129 @@ async def _do_img2img(message: Message, uid: int, img_b64: str, tg_file_path: st
 # 📦 ПАКЕТНАЯ ОБРАБОТКА  ФОТО
 # ═══════════════════════════════════════════════════════════════════════════
 
-async def buffer_photo_packet(uid: int, message: Message, photo_info: PhotoInfo, media_group_id: str | None):
+def _cleanup_photo_batch(uid: int, buffer_id: str) -> None:
+    timer_key = (uid, buffer_id)
+    timer = photo_buffer_timers.pop(timer_key, None)
+    if timer:
+        timer.cancel()
+    if uid in photo_batches:
+        photo_batches[uid].pop(buffer_id, None)
+        if not photo_batches[uid]:
+            photo_batches.pop(uid, None)
+    if photo_batch_last_single.get(uid) == buffer_id:
+        photo_batch_last_single.pop(uid, None)
+    current_packet_mode.pop(uid, None)
+
+
+async def buffer_photo_packet(uid: int, message: Message | None, photo_info: PhotoInfo, media_group_id: str | None):
     """
     Буферизирует одно фото в пакет.
     Если это первое фото пакета или первое фото без альбома — запускает таймер.
     """
-    import time
-    
-    # Если нет media_group_id (одиночное фото) — используем uid+timestamp как identifier
-    buffer_id = media_group_id or f"{uid}_{int(time.time() * 1000)}"
-    
-    # Инициализируем буфер для этого пакета
-    if uid not in photo_buffers:
-        photo_buffers[uid] = {}
-    
-    if buffer_id not in photo_buffers[uid]:
-        photo_buffers[uid][buffer_id] = {
+    now = _time_global.monotonic()
+
+    if media_group_id:
+        buffer_id = str(media_group_id)
+    else:
+        buffer_id = photo_batch_last_single.get(uid, "")
+        packet = photo_batches.get(uid, {}).get(buffer_id) if buffer_id else None
+        if not packet or packet.get("processed") or now - packet.get("last_update", 0.0) > PHOTO_BUFFER_TIMEOUT:
+            buffer_id = f"single_{uid}_{int(now * 1000)}"
+            photo_batch_last_single[uid] = buffer_id
+
+    if uid not in photo_batches:
+        photo_batches[uid] = {}
+
+    packet = photo_batches[uid].setdefault(
+        buffer_id,
+        {
             "photos": [],
-            "timestamp": time.time(),
+            "timestamp": now,
+            "last_update": now,
             "message": message,
             "media_group_id": media_group_id,
-        }
-    
-    # Добавляем фото в буфер
-    photo_buffers[uid][buffer_id]["photos"].append(photo_info)
-    
-    # Если это первое фото пакета — запускаем таймер ожидания
-    if len(photo_buffers[uid][buffer_id]["photos"]) == 1:
-        # Отменяем старый таймер если был
-        if uid in photo_buffer_timers and photo_buffer_timers[uid]:
-            try:
-                photo_buffer_timers[uid].cancel()
-            except:
-                pass
-        
-        # Функция-таймер
-        async def wait_and_process():
+            "seen_ids": set(),
+            "processed": False,
+            "overflow": False,
+            "caption": "",
+        },
+    )
+
+    dedupe_key = photo_info.file_unique_id or photo_info.file_id
+    if dedupe_key in packet["seen_ids"]:
+        logging.info(f"[photo-batch] duplicate skipped uid={uid} batch={buffer_id} file={dedupe_key}")
+        return
+
+    packet["message"] = message or packet["message"]
+    packet["last_update"] = now
+    if message and message.caption and not packet["caption"]:
+        packet["caption"] = message.caption
+
+    if len(packet["photos"]) >= PHOTO_BATCH_MAX_PHOTOS:
+        packet["overflow"] = True
+        logging.warning(f"[photo-batch] overflow uid={uid} batch={buffer_id} limit={PHOTO_BATCH_MAX_PHOTOS}")
+    else:
+        packet["photos"].append(photo_info)
+        packet["seen_ids"].add(dedupe_key)
+
+    timer_key = (uid, buffer_id)
+    old_timer = photo_buffer_timers.pop(timer_key, None)
+    if old_timer:
+        old_timer.cancel()
+
+    async def wait_and_process():
+        try:
             await asyncio.sleep(PHOTO_BUFFER_TIMEOUT)
-            if uid in photo_buffers and buffer_id in photo_buffers[uid]:
-                await process_photo_packet(uid, buffer_id)
-        
-        # Запускаем таймер
-        task = asyncio.create_task(wait_and_process())
-        photo_buffer_timers[uid] = task
-    
-    # Показываем индикатор ожидания
-    photo_count = len(photo_buffers[uid][buffer_id]["photos"])
-    status_text = f"📸 Буферизирую фото... Получено: {photo_count}"
-    
-    try:
-        await message.answer(status_text, parse_mode="HTML")
-    except:
-        pass
+            batch = photo_batches.get(uid, {}).get(buffer_id)
+            if not batch or batch.get("processed"):
+                return
+            if now != batch.get("last_update"):
+                return
+            await process_photo_packet(uid, buffer_id)
+        except asyncio.CancelledError:
+            return
+
+    photo_buffer_timers[timer_key] = asyncio.create_task(wait_and_process())
 
 
 async def process_photo_packet(uid: int, buffer_id: str):
     """
     Обрабатывает пакет фото: выясняет кол-во и показывает меню с режимами обработки.
     """
-    if uid not in photo_buffers or buffer_id not in photo_buffers[uid]:
+    if uid not in photo_batches or buffer_id not in photo_batches[uid]:
         return
-    
-    packet = photo_buffers[uid][buffer_id]
+
+    packet = photo_batches[uid][buffer_id]
+    if packet.get("processed"):
+        return
     photos = packet["photos"]
     message = packet["message"]
-    
-    if not photos:
+
+    if not photos or message is None:
+        _cleanup_photo_batch(uid, buffer_id)
         return
-    
-    photo_count = len(photos)
-    
-    # Очищаем таймер
-    if uid in photo_buffer_timers:
-        try:
-            photo_buffer_timers[uid].cancel()
-        except:
-            pass
-        photo_buffer_timers.pop(uid, None)
-    
-    # Показываем меню с режимами обработки
-    await send_photo_packet_menu(message, uid, buffer_id, photo_count, photos)
+
+    packet["processed"] = True
+    timer = photo_buffer_timers.pop((uid, buffer_id), None)
+    if timer:
+        timer.cancel()
+
+    logging.info(
+        f"[photo-batch] ready uid={uid} batch={buffer_id} photos={len(photos)} media_group={packet.get('media_group_id')}"
+    )
+    await send_photo_packet_menu(message, uid, buffer_id, len(photos), photos)
 
 
 async def send_photo_packet_menu(message: Message, uid: int, buffer_id: str, photo_count: int, photos: list):
     """
     Показывает меню с режимами обработки пакета фото.
     """
+    packet = photo_batches.get(uid, {}).get(buffer_id, {})
+    overflow_note = ""
+    if packet.get("overflow"):
+        overflow_note = f"\n⚠️ Учтены только первые {PHOTO_BATCH_MAX_PHOTOS} фото."
     text = (
-        f"📸 <b>Пакет фото получен!</b>\n\n"
-        f"Количество фото: <b>{photo_count}</b>\n\n"
+        f"📸 <b>Получено {photo_count} фото</b>{overflow_note}\n\n"
         f"<b>Что сделать?</b>\n"
     )
     
@@ -17595,24 +17686,19 @@ async def analyze_photo_packet_batch(message: Message, uid: int, buffer_id: str,
           "detailed" → подробный анализ каждого
           "diff" → поиск различий
     """
-    if uid not in photo_buffers or buffer_id not in photo_buffers[uid]:
+    if uid not in photo_batches or buffer_id not in photo_batches[uid]:
         await message.answer("❌ Пакет фото не найден.", parse_mode="HTML")
         return
-    
-    packet = photo_buffers[uid][buffer_id]
+
+    packet = photo_batches[uid][buffer_id]
     photos = packet["photos"]
     
     if not photos:
         await message.answer("❌ В пакете нет фото.", parse_mode="HTML")
         return
     
-    # Проверяем лимиты
-    cur_key = get_model_key(uid)
-    vision_key = select_vision_for_photo(uid)
-    
-    # Для бесплатных пользователей используем бесплатную vision-модель
-    if not has_active_sub(uid):
-        vision_key = get_free_vision_model()
+    vision_order = get_photo_vision_candidates(uid)
+    vision_key = vision_order[0]
     
     # Показываем индикатор обработки
     wait_msg = await message.answer(
@@ -17624,27 +17710,28 @@ async def analyze_photo_packet_batch(message: Message, uid: int, buffer_id: str,
     try:
         if mode == "text":
             # Режим OCR/извлечения текста
-            result = await extract_text_from_photos_batch(photos, vision_key, uid)
+            result = await extract_text_from_photos_batch(photos, vision_order, uid)
         elif mode == "compare":
             # Режим сравнения
-            result = await compare_photos_batch(message, photos, vision_key, uid)
+            result = await compare_photos_batch(message, photos, vision_order, uid)
         elif mode == "diff":
             # Режим поиска различий
-            result = await find_photo_differences_batch(message, photos, vision_key, uid)
+            result = await find_photo_differences_batch(message, photos, vision_order, uid)
         elif mode == "detailed":
             # Режим подробного анализа каждого
-            result = await analyze_photos_detailed_batch(message, photos[0], vision_key, uid)
+            await analyze_photos_detailed_batch(message, photos[0], vision_order, uid)
             # Для каждого фото — отдельный анализ
-            for i, photo in enumerate(photos[1:], 2):
+            for photo in photos[1:]:
                 await asyncio.sleep(1)  # небольшая пауза
-                result_next = await analyze_photos_detailed_batch(message, photo, vision_key, uid)
+                await analyze_photos_detailed_batch(message, photo, vision_order, uid)
+            _cleanup_photo_batch(uid, buffer_id)
             return  # результаты уже отправлены
         else:  # "analyze"
             # Стандартный анализ каждого фото
             result = ""
             for i, photo in enumerate(photos, 1):
                 await asyncio.sleep(0.5)  # пауза чтобы не спамить API
-                ans = await analyze_single_photo_batch(message, photo, vision_key, uid)
+                ans = await analyze_single_photo_batch(message, photo, vision_order, uid)
                 result += f"<b>Фото {i}:</b>\n{ans}\n\n"
         
         # Удаляем сообщение "обработка"
@@ -17668,7 +17755,7 @@ async def analyze_photo_packet_batch(message: Message, uid: int, buffer_id: str,
                 await message.answer(result[:3800])
         
         # Очищаем буфер
-        photo_buffers[uid].pop(buffer_id, None)
+        _cleanup_photo_batch(uid, buffer_id)
         
     except Exception as e:
         try:
@@ -17679,7 +17766,7 @@ async def analyze_photo_packet_batch(message: Message, uid: int, buffer_id: str,
         await message.answer(f"❌ Ошибка обработки: {str(e)[:150]}", parse_mode="HTML")
 
 
-async def analyze_single_photo_batch(message: Message, photo: PhotoInfo, vision_key: str, uid: int) -> str:
+async def analyze_single_photo_batch(message: Message, photo: PhotoInfo, vision_order: list[str], uid: int) -> str:
     """Анализирует одно фото через vision-модель."""
     try:
         vision_msg = [{
@@ -17689,15 +17776,15 @@ async def analyze_single_photo_batch(message: Message, photo: PhotoInfo, vision_
                 {"type": "text", "text": "Что изображено на этом фото? Опиши подробно."},
             ]
         }]
-        ans = await call_chat(vision_msg, vision_key, max_tokens=2000)
-        spend_limit(uid, vision_key)
-        return ans[:1500]
+        ans, used_model, _ = await call_vision_with_fallback(uid, vision_msg, max_tokens=2000, vision_order=vision_order)
+        model_note = MODELS.get(used_model, {}).get("label", used_model)
+        return f"<i>{model_note}</i>\n{ans[:1500]}"
     except Exception as e:
         logging.error(f"analyze_single_photo_batch: {e}")
         return f"⚠️ Ошибка анализа: {str(e)[:100]}"
 
 
-async def analyze_photos_detailed_batch(message: Message, photo: PhotoInfo, vision_key: str, uid: int):
+async def analyze_photos_detailed_batch(message: Message, photo: PhotoInfo, vision_order: list[str], uid: int):
     """Подробный анализ одного фото с отправкой результата."""
     try:
         vision_prompt = (
@@ -17716,10 +17803,9 @@ async def analyze_photos_detailed_batch(message: Message, photo: PhotoInfo, visi
                 {"type": "text", "text": vision_prompt},
             ]
         }]
-        ans = await call_chat(vision_msg, vision_key, max_tokens=2500)
-        spend_limit(uid, vision_key)
+        ans, used_model, _ = await call_vision_with_fallback(uid, vision_msg, max_tokens=2500, vision_order=vision_order)
         
-        header = f"🧐 <b>Подробный анализ</b>\n\n{MODELS.get(vision_key, {}).get('label', vision_key)}\n\n"
+        header = f"🧐 <b>Подробный анализ</b>\n\n{MODELS.get(used_model, {}).get('label', used_model)}\n\n"
         html_ans = md_to_html(ans)
         try:
             await message.answer(header + html_ans[:3800], parse_mode="HTML")
@@ -17730,7 +17816,7 @@ async def analyze_photos_detailed_batch(message: Message, photo: PhotoInfo, visi
         await message.answer(f"❌ Ошибка анализа: {str(e)[:150]}", parse_mode="HTML")
 
 
-async def compare_photos_batch(message: Message, photos: list, vision_key: str, uid: int) -> str:
+async def compare_photos_batch(message: Message, photos: list, vision_order: list[str], uid: int) -> str:
     """Сравнивает несколько фото между собой."""
     try:
         if len(photos) < 2:
@@ -17754,15 +17840,15 @@ async def compare_photos_batch(message: Message, photos: list, vision_key: str, 
             })
         
         vision_msg = [{"role": "user", "content": content}]
-        ans = await call_chat(vision_msg, vision_key, max_tokens=2500)
-        spend_limit(uid, vision_key)
-        return f"⚖️ <b>Сравнение ({len(photos)} фото)</b>\n\n{ans[:2500]}"
+        ans, used_model, _ = await call_vision_with_fallback(uid, vision_msg, max_tokens=2500, vision_order=vision_order)
+        model_note = MODELS.get(used_model, {}).get("label", used_model)
+        return f"⚖️ <b>Сравнение ({len(photos)} фото)</b>\n<i>{model_note}</i>\n\n{ans[:2500]}"
     except Exception as e:
         logging.error(f"compare_photos_batch: {e}")
         return f"❌ Ошибка сравнения: {str(e)[:150]}"
 
 
-async def find_photo_differences_batch(message: Message, photos: list, vision_key: str, uid: int) -> str:
+async def find_photo_differences_batch(message: Message, photos: list, vision_order: list[str], uid: int) -> str:
     """Находит различия между фото."""
     try:
         if len(photos) < 2:
@@ -17785,15 +17871,15 @@ async def find_photo_differences_batch(message: Message, photos: list, vision_ke
             })
         
         vision_msg = [{"role": "user", "content": content}]
-        ans = await call_chat(vision_msg, vision_key, max_tokens=2500)
-        spend_limit(uid, vision_key)
-        return f"🔎 <b>Различия между фото</b>\n\n{ans[:2500]}"
+        ans, used_model, _ = await call_vision_with_fallback(uid, vision_msg, max_tokens=2500, vision_order=vision_order)
+        model_note = MODELS.get(used_model, {}).get("label", used_model)
+        return f"🔎 <b>Различия между фото</b>\n<i>{model_note}</i>\n\n{ans[:2500]}"
     except Exception as e:
         logging.error(f"find_photo_differences_batch: {e}")
         return f"❌ Ошибка: {str(e)[:150]}"
 
 
-async def extract_text_from_photos_batch(photos: list, vision_key: str, uid: int) -> str:
+async def extract_text_from_photos_batch(photos: list, vision_order: list[str], uid: int) -> str:
     """Извлекает цифры и текст из всех фото в пакете."""
     try:
         text_prompt = (
@@ -17817,9 +17903,9 @@ async def extract_text_from_photos_batch(photos: list, vision_key: str, uid: int
                     }
                 ]
                 vision_msg = [{"role": "user", "content": content}]
-                ans = await call_chat(vision_msg, vision_key, max_tokens=1500)
-                spend_limit(uid, vision_key)
-                all_texts.append(f"<b>Фото {i}:</b>\n{ans}\n")
+                ans, used_model, _ = await call_vision_with_fallback(uid, vision_msg, max_tokens=1500, vision_order=vision_order)
+                model_note = MODELS.get(used_model, {}).get("label", used_model)
+                all_texts.append(f"<b>Фото {i}:</b> <i>{model_note}</i>\n{ans}\n")
             except Exception as e:
                 all_texts.append(f"<b>Фото {i}:</b> ⚠️ Ошибка: {str(e)[:80]}\n")
                 continue
@@ -17861,46 +17947,17 @@ async def handle_photo(message: Message):
     
     # Если НЕТУ пендинг-состояний → буферизируем фото в пакет
     if not _has_pending_request:
-        # Получаем media_group_id из сообщения (есть только у фото из альбома)
         media_group_id = message.media_group_id
-        
-        # Создаём объект фото для буфера
         photo_info = PhotoInfo(
             file_id=message.photo[-1].file_id,
             img_b64=img_b64,
-            tg_file_path=tg_file_path
+            tg_file_path=tg_file_path,
+            file_unique_id=getattr(message.photo[-1], "file_unique_id", None),
+            width=getattr(message.photo[-1], "width", 0),
+            height=getattr(message.photo[-1], "height", 0),
         )
-        
-        # Если есть caption — значит это последнее фото в альбоме или одиночное
-        # В этом случае отменяем таймер и сразу обрабатываем
-        if user_caption.strip():
-            # Если таймер был запущен — отменяем его
-            if uid in photo_buffer_timers and photo_buffer_timers[uid]:
-                try:
-                    photo_buffer_timers[uid].cancel()
-                except:
-                    pass
-                photo_buffer_timers.pop(uid, None)
-            
-            # Обработаем пакет с caption как инструкцией
-            current_packet_mode[uid] = "analyze"
-            # TODO: можем добавить логику парсинга caption'а для режима
-        
-        # Буферизируем фото
+
         await buffer_photo_packet(uid, message, photo_info, media_group_id)
-        
-        # Если есть caption или нет media_group_id — обрабатываем сразу после буфера
-        if user_caption.strip() or media_group_id is None:
-            await asyncio.sleep(PHOTO_BUFFER_TIMEOUT + 0.5)
-            
-            # Если в буфере есть пакет — обрабатываем его
-            if uid in photo_buffers:
-                for buffer_id, packet in list(photo_buffers[uid].items()):
-                    if packet["media_group_id"] == media_group_id or (media_group_id is None):
-                        # После таймаута показываем меню выбора режима
-                        await process_photo_packet(uid, buffer_id)
-                        break
-        
         return
 
     # ════════════════════════════════════════════════════════════════════
@@ -18099,7 +18156,6 @@ async def handle_photo(message: Message):
 
 async def _analyze_photo(message, uid: int, img_b64: str, caption: str, user_caption: str = ""):
     """Анализирует фото через vision-модель."""
-    FALLBACK_VISION = ["claude_opus", "claude_haiku", "claude_sonnet", "gpt52", "gemini_25_flash", "gemini_20_flash", "gemini_3_flash", "qwen3_vl", "c4ai_vis32b", "command_vision"]
     cur_key = get_model_key(uid)
 
     # Если caption пустой - используем дефолтный запрос
@@ -18119,13 +18175,8 @@ async def _analyze_photo(message, uid: int, img_b64: str, caption: str, user_cap
         )
         return
 
-    # Строим порядок: выбранная модель (если vision) + все fallback
-    if cur_key in VISION_MODELS and cur_key not in disabled_models:
-        vision_order = [cur_key] + [k for k in FALLBACK_VISION if k != cur_key and k in MODELS and k not in disabled_models]
-        auto_note = ""
-    else:
-        vision_order = [k for k in FALLBACK_VISION if k in MODELS and k not in disabled_models]
-        auto_note = " <i>(авто)</i>"
+    vision_order = get_photo_vision_candidates(uid)
+    auto_note = " <i>(авто)</i>" if cur_key == "auto" or cur_key not in VISION_MODELS else ""
 
     if not vision_order:
         await message.answer("⚠️ Нет доступных моделей для анализа фото.", parse_mode="HTML")
@@ -18139,51 +18190,51 @@ async def _analyze_photo(message, uid: int, img_b64: str, caption: str, user_cap
 
     async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
         errors = []
-        # Перебираем все vision модели по порядку с полным fallback
-        for vk in vision_order:
+        vision_msg = [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
+            {"type": "text", "text": caption},
+        ]}]
+        try:
+            ans, used_model, errors = await call_vision_with_fallback(
+                uid,
+                vision_msg,
+                max_tokens=3000,
+                vision_order=vision_order,
+            )
+            last_responses[uid] = {"q": f"[Фото] {caption}", "a": ans, "model_label": MODELS.get(used_model, {}).get("label", "ИИ"), "model_key": used_model}
+            last_photo[uid] = {
+                "img_b64": img_b64,
+                "caption": user_caption,
+                "last_answer": ans[:800],   # Контекст ответа для follow-up
+                "photo_context": True,       # Флаг: фото было проанализировано
+            }
+            if uid not in user_memory:
+                user_memory[uid] = deque(maxlen=20)
+            user_memory[uid].append({"role": "user", "content": f"[Фото: '{user_caption or caption}']"})
+            user_memory[uid].append({"role": "assistant", "content": ans})
+            asyncio.create_task(db_save_user(uid, message.from_user.first_name or "", message.from_user.username or ""))
+            await wait_msg.delete()
+            _photo_kb = save_kb(uid)
             try:
-                vision_msg = [{"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-                    {"type": "text", "text": caption},
-                ]}]
-                ans = await call_chat(vision_msg, vk, max_tokens=3000)
-                last_responses[uid] = {"q": f"[Фото] {caption}", "a": ans, "model_label": MODELS.get(vk, {}).get("label", "ИИ"), "model_key": vk}
-                last_photo[uid] = {
-                    "img_b64": img_b64,
-                    "caption": user_caption,
-                    "last_answer": ans[:800],   # Контекст ответа для follow-up
-                    "photo_context": True,       # Флаг: фото было проанализировано
-                }
-                if uid not in user_memory:
-                    user_memory[uid] = deque(maxlen=20)
-                user_memory[uid].append({"role": "user", "content": f"[Фото: '{user_caption or caption}']"})
-                user_memory[uid].append({"role": "assistant", "content": ans})
-                spend_limit(uid, vk)
-                asyncio.create_task(db_save_user(uid, message.from_user.first_name or "", message.from_user.username or ""))
-                await wait_msg.delete()
-                # Клавиатура с кнопкой «Красиво» — ВСЕГДА
-                _photo_kb = save_kb(uid)
+                _vurl = store_answer(ans, MODELS[used_model]["label"], used_model)
+                _photo_kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🌐 Красиво", url=_vurl)]
+                ] + _photo_kb.inline_keyboard)
+            except Exception:
+                pass
+            header = f"🔍 <i>{MODELS[used_model]['label']}</i>\n\n"
+            if re.search(r"```", ans):
+                await message.answer(header, parse_mode="HTML")
+                await smart_send(message, ans, reply_markup=_photo_kb)
+            else:
+                html_ans = md_to_html(ans)
                 try:
-                    _vurl = store_answer(ans, MODELS[vk]["label"], vk)
-                    _photo_kb = InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text="🌐 Красиво", url=_vurl)]
-                    ] + _photo_kb.inline_keyboard)
+                    await message.answer(header + html_ans[:3800], parse_mode="HTML", reply_markup=_photo_kb)
                 except Exception:
-                    pass
-                header = f"🔍 <i>{MODELS[vk]['label']}</i>\n\n"
-                if re.search(r"```", ans):
-                    await message.answer(header, parse_mode="HTML")
-                    await smart_send(message, ans, reply_markup=_photo_kb)
-                else:
-                    html_ans = md_to_html(ans)
-                    try:
-                        await message.answer(header + html_ans[:3800], parse_mode="HTML", reply_markup=_photo_kb)
-                    except Exception:
-                        await message.answer(header + ans[:3800], reply_markup=_photo_kb)
-                return
-            except Exception as e:
-                errors.append(f"{vk}: {str(e)[:80]}")
-                logging.error(f"Vision {vk}: {e}")
+                    await message.answer(header + ans[:3800], reply_markup=_photo_kb)
+            return
+        except Exception as e:
+            errors.append(str(e))
 
         await wait_msg.delete()
         await message.answer("❌ Все vision-модели недоступны:\n" + "\n".join(errors))
@@ -20042,6 +20093,7 @@ async def tg_webhook_handler(request: aiohttp_web.Request) -> aiohttp_web.Respon
     return aiohttp_web.Response(text="ok")
 
 async def start_api_server():
+    global api_runner
     app = aiohttp_web.Application(client_max_size=20 * 1024 * 1024)  # 20MB для base64 фото
     app.router.add_post("/suno_callback", suno_callback_handler)
     app.router.add_post("/platega_callback", platega_callback_handler)
@@ -20076,9 +20128,9 @@ async def start_api_server():
     app.router.add_get("/view", view_page_handler)
     app.router.add_get("/View.html", view_page_handler)  # Алиас для совместимости
     app.router.add_get("/admin/stats", admin_stats_handler)
-    runner = aiohttp_web.AppRunner(app)
-    await runner.setup()
-    site = aiohttp_web.TCPSite(runner, "0.0.0.0", API_PORT)
+    api_runner = aiohttp_web.AppRunner(app)
+    await api_runner.setup()
+    site = aiohttp_web.TCPSite(api_runner, "0.0.0.0", API_PORT)
     await site.start()
     logging.info(f"✅ API сервер запущен на порту {API_PORT}")
 
@@ -20722,9 +20774,7 @@ async def photo_packet_cancel_cb(callback: CallbackQuery):
     buffer_id = callback.data.split("photo_packet_cancel_")[1]
     uid = callback.from_user.id
     
-    # Удаляем пакет из буфера
-    if uid in photo_buffers:
-        photo_buffers[uid].pop(buffer_id, None)
+    _cleanup_photo_batch(uid, buffer_id)
     
     await callback.answer("❌ Отмена", show_alert=False)
     try:
@@ -20739,9 +20789,7 @@ async def photo_packet_close_cb(callback: CallbackQuery):
     buffer_id = callback.data.split("photo_packet_close_")[1]
     uid = callback.from_user.id
     
-    # Удаляем пакет из буфера
-    if uid in photo_buffers:
-        photo_buffers[uid].pop(buffer_id, None)
+    _cleanup_photo_batch(uid, buffer_id)
     
     await callback.answer()
     try:
@@ -20751,66 +20799,105 @@ async def photo_packet_close_cb(callback: CallbackQuery):
 
 
 async def main():
-    global bot
-    await init_db()
-    await init_redis()  # Инициализируем Redis
-    await db_load_all_users()
-    await db_load_subscriptions()
-    await db_load_bot_settings()
-    await bot.delete_webhook(drop_pending_updates=True)
-    # Закрываем старую сессию чтобы избежать TelegramConflictError
+    global bot, redis_client, api_runner
+
+    async def shutdown_runtime():
+        global redis_client, api_runner
+
+        for task in list(photo_buffer_timers.values()):
+            task.cancel()
+        photo_buffer_timers.clear()
+
+        for task in list(background_tasks):
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+            background_tasks.clear()
+
+        if api_runner is not None:
+            try:
+                await api_runner.cleanup()
+            except Exception as e:
+                logging.warning(f"api_runner cleanup: {e}")
+            api_runner = None
+
+        if redis_client is not None:
+            try:
+                await redis_client.aclose()
+            except Exception as e:
+                logging.warning(f"redis close: {e}")
+            redis_client = None
+
+        try:
+            await bot.session.close()
+        except Exception as e:
+            logging.warning(f"bot.session.close: {e}")
+
     try:
-        await bot.close()
-    except Exception:
-        pass
-    await asyncio.sleep(2)
-    bot = Bot(token=TELEGRAM_TOKEN)
-    # Устанавливаем команды для навигации (видны в поле ввода)
-    await bot.set_my_commands([
-        BotCommand(command="start",   description="🏠 Главное меню"),
-        BotCommand(command="profile", description="👤 Мой профиль"),
-        BotCommand(command="ai",      description="💬 Задать вопрос ИИ"),
-        BotCommand(command="img",     description="🎨 Генерация картинок"),
-        BotCommand(command="music",   description="🎵 Генерация музыки"),
-        BotCommand(command="model",   description="🤖 Выбрать модель"),
-        BotCommand(command="report",  description="📝 Доклад/Реферат"),
-        BotCommand(command="pptx",    description="🎞 Генерация презентации PPTX"),
-        BotCommand(command="webpptx", description="🌐 Веб-презентация HTML"),
-        BotCommand(command="clear",   description="🧹 Очистить память"),
-        BotCommand(command="about",   description="ℹ️ О боте"),
-        BotCommand(command="info",    description="💡 Помощь и контакты"),
-        BotCommand(command="ref",     description="🔗 Реферальная программа"),
-        BotCommand(command="tts",     description="🔊 Включить/выключить голосовые ответы"),
-    ], scope=BotCommandScopeDefault())
-    # Устанавливаем кнопку "🤖 ХУЗА AI" слева в поле ввода (MenuButtonWebApp)
-    try:
-        await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="🤖 ХУЗА AI",
-                web_app=WebAppInfo(url=f"{MINI_APP_URL}?api={API_BASE_URL}")
+        await init_db()
+        await init_redis()  # Инициализируем Redis
+        await db_load_all_users()
+        await db_load_subscriptions()
+        await db_load_bot_settings()
+        await bot.delete_webhook(drop_pending_updates=True)
+        # Закрываем старую сессию чтобы избежать TelegramConflictError
+        try:
+            await bot.close()
+        except Exception:
+            pass
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
+        await asyncio.sleep(2)
+        bot = Bot(token=TELEGRAM_TOKEN)
+        # Устанавливаем команды для навигации (видны в поле ввода)
+        await bot.set_my_commands([
+            BotCommand(command="start",   description="🏠 Главное меню"),
+            BotCommand(command="profile", description="👤 Мой профиль"),
+            BotCommand(command="ai",      description="💬 Задать вопрос ИИ"),
+            BotCommand(command="img",     description="🎨 Генерация картинок"),
+            BotCommand(command="music",   description="🎵 Генерация музыки"),
+            BotCommand(command="model",   description="🤖 Выбрать модель"),
+            BotCommand(command="report",  description="📝 Доклад/Реферат"),
+            BotCommand(command="pptx",    description="🎞 Генерация презентации PPTX"),
+            BotCommand(command="webpptx", description="🌐 Веб-презентация HTML"),
+            BotCommand(command="clear",   description="🧹 Очистить память"),
+            BotCommand(command="about",   description="ℹ️ О боте"),
+            BotCommand(command="info",    description="💡 Помощь и контакты"),
+            BotCommand(command="ref",     description="🔗 Реферальная программа"),
+            BotCommand(command="tts",     description="🔊 Включить/выключить голосовые ответы"),
+        ], scope=BotCommandScopeDefault())
+        # Устанавливаем кнопку "🤖 ХУЗА AI" слева в поле ввода (MenuButtonWebApp)
+        try:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="🤖 ХУЗА AI",
+                    web_app=WebAppInfo(url=f"{MINI_APP_URL}?api={API_BASE_URL}")
+                )
             )
-        )
-        logging.info(f"✅ WebApp кнопка слева установлена: {MINI_APP_URL}")
-    except Exception as e:
-        logging.warning(f"set_chat_menu_button: {e}")
-    # ── Фоновые задачи ──
-    asyncio.create_task(_background_refresh_limits())  # Сброс лимитов каждые 30 мин
-    asyncio.create_task(check_expiring_subs())          # Уведомления об истечении подписки
-    asyncio.create_task(_img_gen_worker())              # Задача 6: воркер очереди изображений
-    # ── Запуск: Webhook или long polling (Задача 5) ──────────────────
-    await start_api_server()
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
-    if WEBHOOK_URL:
-        webhook_path = "/tg_webhook"
-        full_webhook = WEBHOOK_URL.rstrip("/") + webhook_path
-        await bot.set_webhook(full_webhook, drop_pending_updates=True)
-        logging.info(f"✅ Webhook установлен: {full_webhook}")
-        # Держим event loop живым
-        while True:
-            await asyncio.sleep(3600)
-    else:
-        logging.info("ℹ️ WEBHOOK_URL не задан — используется long polling")
-        await dp.start_polling(bot)
+            logging.info(f"✅ WebApp кнопка слева установлена: {MINI_APP_URL}")
+        except Exception as e:
+            logging.warning(f"set_chat_menu_button: {e}")
+        # ── Фоновые задачи ──
+        track_background_task(asyncio.create_task(_background_refresh_limits()))
+        track_background_task(asyncio.create_task(check_expiring_subs()))
+        track_background_task(asyncio.create_task(_img_gen_worker()))
+        # ── Запуск: Webhook или long polling (Задача 5) ──────────────────
+        await start_api_server()
+        WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+        if WEBHOOK_URL:
+            webhook_path = "/tg_webhook"
+            full_webhook = WEBHOOK_URL.rstrip("/") + webhook_path
+            await bot.set_webhook(full_webhook, drop_pending_updates=True)
+            logging.info(f"✅ Webhook установлен: {full_webhook}")
+            while True:
+                await asyncio.sleep(3600)
+        else:
+            logging.info("ℹ️ WEBHOOK_URL не задан — используется long polling")
+            await dp.start_polling(bot)
+    finally:
+        await shutdown_runtime()
 
 if __name__ == "__main__":
     asyncio.run(main())
