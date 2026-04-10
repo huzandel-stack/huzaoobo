@@ -88,6 +88,49 @@ from aiogram.types import (
 )
 from aiogram.utils.chat_action import ChatActionSender
 
+# ══ NEW IMPORTS ══════════════════════════════════════════════════════
+try:
+    from pydantic import BaseModel, Field, validator
+    HAS_PYDANTIC = True
+except ImportError:
+    HAS_PYDANTIC = False
+    class BaseModel: pass
+    class Field: 
+        def __init__(self, *args, **kwargs): pass
+    def validator(*args, **kwargs):
+        def _dec(f): return f
+        return _dec
+
+try:
+    from tenacity import (
+        retry, stop_after_attempt, wait_exponential,
+        retry_if_exception_type, RetryError
+    )
+    HAS_TENACITY = True
+except ImportError:
+    HAS_TENACITY = False
+    def retry(*args, **kwargs):
+        def _decorator(f):
+            return f
+        return _decorator
+    class RetryError(Exception): pass
+
+try:
+    import redis.asyncio as redis
+    HAS_REDIS = True
+except ImportError:
+    HAS_REDIS = False
+    redis = None
+
+try:
+    from loguru import logger as loguru_logger
+    HAS_LOGURU = True
+except ImportError:
+    HAS_LOGURU = False
+    loguru_logger = None
+
+# ══════════════════════════════════════════════════════════════════════
+
 from docx import Document
 from PIL import Image, ImageDraw, ImageFont
 from fpdf import FPDF
@@ -1651,6 +1694,25 @@ async def init_db():
                 await conn.execute("CREATE INDEX IF NOT EXISTS idx_model_stats_ts ON model_stats(ts)")
             except Exception:
                 pass
+            
+            # ══ ОПТИМИЗАЦИЯ БД: КРИТИЧЕСКИЕ ИНДЕКСЫ ══
+            indexes = [
+                ("idx_users_uid",           "CREATE INDEX IF NOT EXISTS idx_users_uid ON users(uid)"),
+                ("idx_users_username",      "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username) WHERE username != ''"),
+                ("idx_users_joined",        "CREATE INDEX IF NOT EXISTS idx_users_joined ON users(joined)"),
+                ("idx_payments_uid",        "CREATE INDEX IF NOT EXISTS idx_payments_uid ON payments(uid)"),
+                ("idx_payments_created",    "CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)"),
+                ("idx_chat_history_uid",    "CREATE INDEX IF NOT EXISTS idx_chat_history_uid ON chat_history(uid)"),
+                ("idx_model_stats_model",   "CREATE INDEX IF NOT EXISTS idx_model_stats_model ON model_stats(model_key)"),
+                ("idx_users_sub_expires",   "CREATE INDEX IF NOT EXISTS idx_users_sub_expires ON users(sub_expires)"),
+            ]
+            for idx_name, idx_sql in indexes:
+                try:
+                    await conn.execute(idx_sql)
+                except Exception as e:
+                    if "already exists" not in str(e).lower():
+                        logging.debug(f"Index {idx_name}: {e}")
+
         logging.info("✅ PostgreSQL подключена")
     except Exception as e:
         logging.error(f"❌ PostgreSQL: {e}")
@@ -1931,6 +1993,201 @@ class AntiSpamMiddleware(BaseMiddleware):
 
         return await handler(event, data)
 
+
+# ══════════════════════════════════════════════════════════════════════
+# 📦 PYDANTIC VALIDATION SCHEMAS
+# ══════════════════════════════════════════════════════════════════════
+
+if HAS_PYDANTIC:
+    class ChatRequest(BaseModel):
+        """Валидация запроса к чату"""
+        text: str = Field(..., min_length=1, max_length=10000)
+        model: str = Field("auto")
+        images: list = Field(default_factory=list)
+        history: list = Field(default_factory=list)
+        answer_mode: str = Field(default="fast")
+    
+    class ImggenRequest(BaseModel):
+        """Валидация запроса к генерации изображений"""
+        prompt: str = Field(..., min_length=1, max_length=5000)
+        model: str = Field(default="flux_klein4")
+        ratio: str = Field(default="1:1")
+        image_base64: str = Field(default="")
+    
+    class ReportRequest(BaseModel):
+        """Валидация запроса к генерации доклада"""
+        topic: str = Field(..., min_length=3, max_length=500)
+        pages: int = Field(default=5, ge=1, le=10)
+        report_type: str = Field(default="doklad")
+        model: str = Field(default="sonar_deep_research")
+        wishes: str = Field(default="")
+    
+    class MusicRequest(BaseModel):
+        """Валидация запроса к генерации музыки"""
+        prompt: str = Field(..., min_length=3, max_length=2000)
+        style: str = Field(default="pop")
+        lang: str = Field(default="ru")
+
+# ══════════════════════════════════════════════════════════════════════
+# 🟥 REDIS CACHE SYSTEM
+# ══════════════════════════════════════════════════════════════════════
+
+redis_client = None
+
+async def init_redis():
+    """Инициализирует Redis соединение (если доступен)."""
+    global redis_client
+    if not HAS_REDIS:
+        logging.warning("Redis не установлен (pip install redis)")
+        return
+    try:
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+        redis_client = await redis.from_url(redis_url, encoding="utf-8", decode_responses=True)
+        await redis_client.ping()
+        logging.info("✅ Redis подключен")
+    except Exception as e:
+        logging.warning(f"❌ Redis недоступен: {e}")
+        redis_client = None
+
+async def get_cached(key: str, ttl: int = 600) -> str | None:
+    """Получить значение из Redis кэша."""
+    if not redis_client:
+        return None
+    try:
+        val = await redis_client.get(f"cache:{key}")
+        return val
+    except Exception as e:
+        logging.warning(f"Redis get error: {e}")
+        return None
+
+async def set_cached(key: str, value: str, ttl: int = 600):
+    """Сохранить значение в Redis кэше."""
+    if not redis_client:
+        return
+    try:
+        await redis_client.setex(f"cache:{key}", ttl, value)
+    except Exception as e:
+        logging.warning(f"Redis set error: {e}")
+
+async def cache_greeting(uid: int, text: str, response: str, ttl: int = 600):
+    """Кэшировать приветствие/благодарность (10 минут)."""
+    if not redis_client:
+        return
+    try:
+        key = f"greeting:{uid}:{hash(text) % 1000000}"
+        await redis_client.setex(key, ttl, response)
+    except Exception:
+        pass
+
+async def get_cached_greeting(uid: int, text: str) -> str | None:
+    """Получить кэшированное приветствие."""
+    if not redis_client:
+        return None
+    try:
+        key = f"greeting:{uid}:{hash(text) % 1000000}"
+        return await redis_client.get(key)
+    except Exception:
+        return None
+
+# ══════════════════════════════════════════════════════════════════════
+# 🎯 TASK CANCELLATION SYSTEM
+# ══════════════════════════════════════════════════════════════════════
+
+active_tasks: dict = {}  # uid -> {task_id -> CancelFlag}
+task_counter = 0
+
+class CancelFlag:
+    """Флаг отмены для длительных задач"""
+    def __init__(self):
+        self.cancelled = False
+    
+    def cancel(self):
+        self.cancelled = True
+    
+    def is_cancelled(self) -> bool:
+        return self.cancelled
+
+async def create_task(uid: int) -> str:
+    """Создаёт task_id и регистрирует флаг отмены."""
+    global task_counter
+    task_counter += 1
+    task_id = f"{uid}_{task_counter}"
+    if uid not in active_tasks:
+        active_tasks[uid] = {}
+    active_tasks[uid][task_id] = CancelFlag()
+    return task_id
+
+async def cancel_task(uid: int, task_id: str):
+    """Отменяет задачу по ID."""
+    if uid in active_tasks and task_id in active_tasks[uid]:
+        active_tasks[uid][task_id].cancel()
+        logging.info(f"Task {task_id} отменена")
+
+def is_task_cancelled(uid: int, task_id: str) -> bool:
+    """Проверляет отменена ли задача."""
+    return active_tasks.get(uid, {}).get(task_id, CancelFlag()).is_cancelled()
+
+# ══════════════════════════════════════════════════════════════════════
+# 📸 BATCH PHOTO BUFFERING SYSTEM
+# ══════════════════════════════════════════════════════════════════════
+
+photo_buffer: dict = {}  # uid -> {media_group_id -> [PhotoInfo]}
+photo_buffer_timers: dict = {}  # uid -> asyncio.Task
+PHOTO_BUFFER_TIMEOUT = 2.0  # секунды
+
+class PhotoInfo:
+    """Информация о фото в буфере"""
+    def __init__(self, file_id: str, file_unique_id: str, width: int, height: int):
+        self.file_id = file_id
+        self.file_unique_id = file_unique_id
+        self.width = width
+        self.height = height
+
+async def buffer_photo(uid: int, media_group_id: str, photo_info: PhotoInfo):
+    """Добавляет фото в буфер для пакетной обработки."""
+    if uid not in photo_buffer:
+        photo_buffer[uid] = {}
+    if media_group_id not in photo_buffer[uid]:
+        photo_buffer[uid][media_group_id] = []
+    
+    photo_buffer[uid][media_group_id].append(photo_info)
+    
+    # Если уже есть таймер — отмени старый
+    if uid in photo_buffer_timers:
+        photo_buffer_timers[uid].cancel()
+    
+    # Запусти таймер на 2 секунды (группировка)
+    async def timeout_handler():
+        await asyncio.sleep(PHOTO_BUFFER_TIMEOUT)
+        if uid in photo_buffer and media_group_id in photo_buffer[uid]:
+            photos = photo_buffer[uid].pop(media_group_id)
+            logging.info(f"Batch processing {len(photos)} photos from {uid}")
+            # Обработка будет вызвана из хендлера сообщения
+    
+    photo_buffer_timers[uid] = asyncio.create_task(timeout_handler())
+
+# ══════════════════════════════════════════════════════════════════════
+# 🔄 PAGINATION HELPERS
+# ══════════════════════════════════════════════════════════════════════
+
+class Paginator:
+    """Простой пагинатор для списков"""
+    def __init__(self, items: list, page_size: int = 10):
+        self.items = items
+        self.page_size = page_size
+        self.total_pages = max(1, (len(items) + page_size - 1) // page_size)
+    
+    def get_page(self, page: int) -> tuple[list, int]:
+        """Возвращает (элементы, номер страницы)"""
+        page = max(1, min(page, self.total_pages))
+        start = (page - 1) * self.page_size
+        end = start + self.page_size
+        return self.items[start:end], page
+    
+    def get_page_info(self, page: int) -> str:
+        """Возвращает строку "Page 3/10" """
+        page = max(1, min(page, self.total_pages))
+        return f"📄 {page}/{self.total_pages}"
 
 # ── FSM-состояния для добавления избранного промпта ──
 class FavStates(StatesGroup):
@@ -3525,64 +3782,87 @@ def _get_file_system_prompt(file_name: str, user_text: str = "") -> str:
 
 
 async def call_chat(messages: list, model_key: str, max_tokens: int = 1500) -> str:
+    """
+    Вызывает AI модель с авторетраем через Tenacity.
+    Обрабатывает context length ошибки путём обрезания истории.
+    """
     m = MODELS[model_key]
-    # All models go through SQ
     payload = {"model": m["name"], "messages": messages, "max_tokens": max_tokens}
     headers = {"Authorization": f"Bearer {SQ_KEY}", "Content-Type": "application/json"}
     _slow = any(s in m["name"] for s in ["qwen3-max", "DeepSeek-R1", "DeepSeek-V3"])
     _tmo  = 300 if _slow else 180
 
-    # Задержки между попытками: 1-я retry → 2 сек, 2-я retry → 5 сек
-    _retry_delays = [0, 2, 5]
+    # Tenacity retry с exponential backoff
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
+    ) if HAS_TENACITY else lambda f: f
+    async def _call_api():
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=_tmo, connect=20)) as s:
+            async with s.post(SQ_CHAT, headers=headers, json=payload) as r:
+                # Обработка 429 (Rate Limit)
+                if r.status == 429:
+                    error_text = await r.text()
+                    # Блокируем ключ Pollinations при 429
+                    pollinations_pool.mark_quota_exceeded(POLLINATIONS_KEY, cooldown_sec=120)
+                    raise RuntimeError(f"Rate limit 429: {error_text[:200]}")
+                
+                # Обработка context length ошибки
+                if r.status == 400:
+                    error_text = await r.text()
+                    if "context" in error_text.lower() or "length" in error_text.lower():
+                        # Обрезаем историю и повтор запроса один раз
+                        if len(messages) > 3:
+                            logging.warning(f"[call_chat] context length exceeded, truncating history")
+                            # Берём только систему и последние 2 сообщения
+                            new_messages = [messages[0]] + messages[-2:] if len(messages) > 1 else messages
+                            payload["messages"] = new_messages
+                            # Рекур сивный вызов с укороченной историей (без retry)
+                            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=_tmo)) as s2:
+                                async with s2.post(SQ_CHAT, headers=headers, json=payload) as r2:
+                                    if r2.status == 200:
+                                        res = await r2.json()
+                                        msg_obj = res["choices"][0]["message"]
+                                        raw = msg_obj.get("content") or msg_obj.get("reasoning_content") or ""
+                                        if "</think>" in raw:
+                                            raw = raw.split("</think>")[-1].strip()
+                                        return raw.strip() or "..."
+                            raise RuntimeError(f"Context still too long after truncation")
+                        raise RuntimeError(f"Context length exceeded: {error_text[:200]}")
+                    raise RuntimeError(f"API 400: {error_text[:400]}")
+                
+                if r.status != 200:
+                    err = await r.text()
+                    raise RuntimeError(f"API {r.status}: {err[:400]}")
+                
+                res = await r.json()
+                msg_obj = res["choices"][0]["message"]
+                raw = msg_obj.get("content") or ""
+                if not raw.strip():
+                    raw = (
+                        msg_obj.get("reasoning_content") or
+                        msg_obj.get("thinking_content") or
+                        msg_obj.get("reasoning") or ""
+                    )
+                if "</think>" in raw:
+                    after = raw.split("</think>")[-1].strip()
+                    if after:
+                        raw = after
+                result = raw.strip()
+                return result or "..."
 
-    for attempt in range(3):
-        try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=_tmo, connect=20)
-            ) as s:
-                async with s.post(SQ_CHAT, headers=headers, json=payload) as r:
-                    if r.status != 200:
-                        err = await r.text()
-                        raise RuntimeError(f"API {r.status}: {err[:400]}")
-                    res = await r.json()
-                    msg_obj = res["choices"][0]["message"]
-                    raw = msg_obj.get("content") or ""
-                    # Некоторые thinking-модели (DeepSeek-R1, etc.) кладут ответ
-                    # в reasoning_content или tool_calls, а content остаётся пустым
-                    if not raw.strip():
-                        raw = (
-                            msg_obj.get("reasoning_content") or
-                            msg_obj.get("thinking_content") or
-                            msg_obj.get("reasoning") or ""
-                        )
-                    # Убираем thinking-блоки
-                    if "</think>" in raw:
-                        after = raw.split("</think>")[-1].strip()
-                        if after:
-                            raw = after
-                    result = raw.strip()
-                    if not result:
-                        result = "..."
-                    return result
-        except aiohttp.ServerDisconnectedError as e:
-            logging.warning(f"[call_chat] ServerDisconnected попытка {attempt+1}/3 {m['name']}")
-            if attempt < 2:
-                await asyncio.sleep(_retry_delays[attempt + 1])
-            else:
-                raise RuntimeError(f"Server disconnected x3: {m['name']}")
-        except (RuntimeError, aiohttp.ClientError) as e:
-            # Retry при сетевых ошибках и RuntimeError (не при 401/403 — там бессмысленно)
-            if attempt < 2:
-                delay = _retry_delays[attempt + 1]
-                logging.warning(f"[call_chat] ошибка попытка {attempt+1}/3, retry через {delay}с: {e}")
-                await asyncio.sleep(delay)
-            else:
-                logging.error(f"[call_chat] все 3 попытки исчерпаны: {e}")
-                raise
-        except Exception as e:
-            # Непредвиденные ошибки — не ретраим, бросаем сразу
-            raise e
-    raise RuntimeError(f"call_chat: все попытки исчерпаны для {m['name']}")
+    try:
+        return await _call_api()
+    except (RetryError if HAS_TENACITY else Exception) as e:
+        logging.error(f"[call_chat] retries exhausted for {m['name']}: {e}")
+        raise RuntimeError(f"Ошибка API после 3 попыток: {str(e)[:200]}")
+    except RuntimeError:
+        raise
+    except Exception as e:
+        logging.error(f"[call_chat] unexpected error: {e}")
+        raise RuntimeError(f"Неожиданная ошибка: {str(e)[:200]}")
+
 
 
 # ── Запрещённые слова для промптов изображений (автозамена/удаление) ──────────
@@ -11507,19 +11787,46 @@ async def rb_history(message: Message):
     if not hist:
         await message.answer("📋 История запросов пуста. Задай первый вопрос!")
         return
+    
+    # Используем Paginator для отображения с пагинацией
+    paginator = Paginator(list(reversed(hist[-50:])))  # Последние 50 запросов
+    page_num = 1
+    items, page_normalized = paginator.get_page(page_num)
+    
     lines = []
-    for i, h in enumerate(reversed(hist[-10:]), 1):
+    for i, h in enumerate(items, 1):
         ts = h.get("ts", ""); q = h.get("q", "")[:50]
         model = MODELS.get(h.get("model",""), {}).get("label", "")[:18]
         lines.append(f"◈ <b>{i}.</b> [{ts}] {q}…\n    <i>{model}</i>")
+    
+    page_info = paginator.get_page_info(page_normalized)
     text = (
         "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
         "📋 <b>ИСТОРИЯ</b>\n"
+        f"{page_info}\n"
         "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
         + "\n\n".join(lines)
     )
-    btns = [[InlineKeyboardButton(text=f"🔁 Повторить #{i+1}", callback_data=f"hist_rep_{len(hist)-1-i}")]
-            for i in range(min(5, len(hist)))]
+    
+    btns = []
+    # Кнопки повторения для первых 5 элементов
+    for i in range(min(3, len(items))):
+        idx_in_reversed = page_normalized * paginator.page_size + i
+        if idx_in_reversed < len(hist):
+            btns.append([InlineKeyboardButton(
+                text=f"🔁 Повторить #{i+1}", 
+                callback_data=f"hist_rep_{len(hist)-1-idx_in_reversed}"
+            )])
+    
+    # Навигация по страницам
+    nav_btns = []
+    if page_normalized > 0:
+        nav_btns.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"hist_page_{page_normalized-1}"))
+    if (page_normalized + 1) * paginator.page_size < len(items):
+        nav_btns.append(InlineKeyboardButton(text="Далее ➡️", callback_data=f"hist_page_{page_normalized+1}"))
+    if nav_btns:
+        btns.append(nav_btns)
+    
     btns.append([InlineKeyboardButton(text="🗑 Очистить", callback_data="hist_clear")])
     await message.answer(text, parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
@@ -12111,6 +12418,62 @@ async def hist_clear_cb(callback: CallbackQuery):
     user_history[uid] = []
     await callback.answer("🗑 История очищена", show_alert=True)
     await _show_profile(callback, uid)
+
+
+@dp.callback_query(F.data.startswith("hist_page_"))
+async def hist_page_cb(callback: CallbackQuery):
+    """Пагинация истории запросов."""
+    uid = callback.from_user.id
+    try:
+        page_num = int(callback.data[10:])
+        if page_num < 0:
+            page_num = 0
+        
+        hist = user_history.get(uid, [])
+        if not hist:
+            await callback.answer("📋 История пуста", show_alert=True)
+            return
+        
+        # Используем Paginator
+        paginator = Paginator(list(reversed(hist[-50:])))
+        items, page_normalized = paginator.get_page(page_num + 1)  # pages are 1-indexed for display
+        
+        if not items:
+            await callback.answer("❌ Страница не найдена", show_alert=True)
+            return
+        
+        lines = []
+        for i, h in enumerate(items, 1):
+            ts = h.get("ts", ""); q = h.get("q", "")[:50]
+            model = MODELS.get(h.get("model",""), {}).get("label", "")[:18]
+            lines.append(f"◈ <b>{i}.</b> [{ts}] {q}…\n    <i>{model}</i>")
+        
+        page_info = paginator.get_page_info(page_normalized)
+        text = (
+            "▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔\n"
+            "📋 <b>ИСТОРИЯ</b>\n"
+            f"{page_info}\n"
+            "▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂\n\n"
+            + "\n\n".join(lines)
+        )
+        
+        nav_btns = []
+        if page_normalized > 0:
+            nav_btns.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"hist_page_{page_normalized-1}"))
+        if (page_normalized + 1) * paginator.page_size < len(hist):
+            nav_btns.append(InlineKeyboardButton(text="Далее ➡️", callback_data=f"hist_page_{page_normalized+1}"))
+        
+        btns = []
+        if nav_btns:
+            btns.append(nav_btns)
+        btns.append([InlineKeyboardButton(text="🗑 Очистить", callback_data="hist_clear")])
+        
+        await callback.message.edit_text(text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
+        await callback.answer()
+    except Exception as e:
+        logging.error(f"hist_page_cb error: {e}")
+        await callback.answer("❌ Ошибка", show_alert=True)
 
 
 @dp.callback_query(F.data == "profile_reflink")
@@ -13088,11 +13451,48 @@ async def admin_find_user(callback: CallbackQuery):
         return await callback.answer("❌ Нет доступа", show_alert=True)
     admin_await[uid] = {"action": "find_user"}
     await callback.message.edit_text(
-        "🔍 <b>Найти пользователя</b>\n\nВведи <code>USER_ID</code>:",
+        "🔍 <b>Найти пользователя</b>\n\n"
+        "Введи <code>USER_ID</code>, <code>@username</code> или имя:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="❌ Отмена", callback_data="menu_admin"),
         ]]),
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("admin_user_"))
+async def admin_user_select(callback: CallbackQuery):
+    """Обработчик выбора пользователя из результатов поиска"""
+    uid = callback.from_user.id
+    if uid not in ADMIN_IDS:
+        return await callback.answer("❌ Нет доступа", show_alert=True)
+    
+    try:
+        target_uid = int(callback.data.split("admin_user_")[1])
+    except (ValueError, IndexError):
+        return await callback.answer("❌ Ошибка", show_alert=True)
+    
+    prof = user_profiles.get(target_uid, {})
+    name     = prof.get("name", "—")
+    username = prof.get("username", "—")
+    joined   = prof.get("joined", "—")
+    requests = prof.get("requests", 0)
+    imgs     = user_images_count.get(target_uid, 0)
+    mk_u     = user_settings.get(target_uid, "—")
+    
+    await callback.message.edit_text(
+        f"🔍 <b>Профиль пользователя</b>\n\n"
+        f"👤 <b>{name}</b> @{username}\n"
+        f"🆔 <code>{target_uid}</code>\n"
+        f"📅 Регистрация: <code>{joined}</code>\n"
+        f"💬 Запросов: <code>{requests}</code>\n"
+        f"🖼 Генераций: <code>{imgs}</code>\n"
+        f"🤖 Модель: <code>{mk_u}</code>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="◀️ Назад", callback_data="menu_admin"),
+        ]])
     )
     await callback.answer()
 
@@ -14790,15 +15190,73 @@ async def handle_text(message: Message, state: FSMContext):
             return
 
         if action == "find_user" and uid in ADMIN_IDS:
+            query = message.text.strip()
+            if not query:
+                await message.answer("❌ Пустой запрос.", parse_mode="HTML")
+                return
+            
+            # Пробуем распарсить как ID
             try:
-                target_uid = int(message.text.strip())
-            except Exception:
-                await message.answer("❌ Введи числовой ID", parse_mode="HTML")
-                return
-            prof = user_profiles.get(target_uid)
+                target_uid = int(query)
+                prof = user_profiles.get(target_uid)
+                if not prof:
+                    await message.answer(f"❌ Пользователь <code>{target_uid}</code> не найден.", parse_mode="HTML")
+                    return
+            except ValueError:
+                # Не ID — ищем по username/name в БД через ILIKE
+                if not db_pool:
+                    await message.answer("❌ База данных недоступна.", parse_mode="HTML")
+                    return
+                
+                try:
+                    async with db_pool.acquire() as conn:
+                        # ILIKE — case-insensitive LIKE (PostgreSQL)
+                        rows = await conn.fetch("""
+                            SELECT uid, name, username, joined, requests 
+                            FROM users 
+                            WHERE username ILIKE $1 OR name ILIKE $1 
+                            ORDER BY requests DESC
+                            LIMIT 5
+                        """, f"%{query}%")
+                    
+                    if not rows:
+                        await message.answer(
+                            f"❌ По запросу <code>{query}</code> ничего не найдено.",
+                            parse_mode="HTML"
+                        )
+                        return
+                    
+                    if len(rows) == 1:
+                        target_uid = rows[0]["uid"]
+                        prof = user_profiles.get(target_uid)
+                    else:
+                        # Показываем список результатов
+                        results_text = f"🔍 <b>Найдено {len(rows)} результатов:</b>\n\n"
+                        buttons = []
+                        for i, r in enumerate(rows, 1):
+                            u = r["uid"]
+                            n = r["name"] or "—"
+                            un = r["username"] or "—"
+                            results_text += f"{i}. <b>{n}</b> (@{un}) · <code>{u}</code>\n"
+                            buttons.append([InlineKeyboardButton(
+                                text=f"{n} ({u})",
+                                callback_data=f"admin_user_{u}"
+                            )])
+                        buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_admin")])
+                        await message.answer(
+                            results_text,
+                            parse_mode="HTML",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+                        )
+                        return
+                except Exception as e:
+                    logging.warning(f"admin search error: {e}")
+                    await message.answer(f"❌ Ошибка поиска: {e}", parse_mode="HTML")
+                    return
+            
+            # Выводим профиль пользователя
             if not prof:
-                await message.answer(f"❌ Пользователь <code>{target_uid}</code> не найден.", parse_mode="HTML")
-                return
+                prof = {}
             name     = prof.get("name", "—")
             username = prof.get("username", "—")
             joined   = prof.get("joined", "—")
@@ -15466,6 +15924,12 @@ async def handle_text(message: Message, state: FSMContext):
 
     # ── Ранний выход: приветствие / благодарность — не запускаем ИИ ──
     if is_greeting_or_thanks(message.text or ""):
+        # Используем Redis кэш для быстрого ответа на приветствия
+        cached = await get_cached_greeting(uid, message.text or "")
+        if cached:
+            await message.answer(cached)
+            return
+        
         import random as _rnd
         replies = [
             "😊 Пожалуйста! Если появятся вопросы — пиши.",
@@ -15473,7 +15937,10 @@ async def handle_text(message: Message, state: FSMContext):
             "🙂 Обращайся! Всегда готов помочь.",
             "✨ Пожалуйста! Задавай следующий вопрос когда будет готов.",
         ]
-        await message.answer(_rnd.choice(replies))
+        chosen_reply = _rnd.choice(replies)
+        # Кэшируем ответ на 3600 сек (1 час)
+        await cache_greeting(uid, message.text or "", chosen_reply, ttl=3600)
+        await message.answer(chosen_reply)
         return
 
 
@@ -19678,6 +20145,7 @@ async def inline_query_handler(inline_query: InlineQuery):
 async def main():
     global bot
     await init_db()
+    await init_redis()  # Инициализируем Redis
     await db_load_all_users()
     await db_load_subscriptions()
     await db_load_bot_settings()
