@@ -340,7 +340,7 @@ BUTTON_ICON_HINTS: dict[str, str | None] = {
 
 _PREMIUM_TEXT_TOKENS = tuple(sorted(PREMIUM_TEXT_HINTS, key=len, reverse=True))
 _BUTTON_TOKENS = tuple(sorted(BUTTON_ICON_HINTS, key=len, reverse=True))
-PREMIUM_BUTTON_ICON_ONLY = os.getenv("PREMIUM_BUTTON_ICON_ONLY", "0").strip().lower() in {"1", "true", "yes", "on"}
+PREMIUM_BUTTON_ICON_ONLY = True  # всегда включено — премиум иконки в кнопках
 
 
 def premium_emoji(name: str, fallback: str = "•") -> str:
@@ -22222,7 +22222,7 @@ async def _send_admin_charts(message: Message, uid: int):
                 GROUP BY hour ORDER BY hour
             """)
             total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
-            sub_users   = await conn.fetchval("SELECT COUNT(*) FROM users WHERE sub_expires > NOW()")
+            sub_users   = await conn.fetchval("SELECT COUNT(*) FROM users WHERE sub_expires::timestamptz > NOW()")
             new_7d      = await conn.fetchval("SELECT COUNT(*) FROM users WHERE joined >= NOW()::date - 7")
 
         import io as _io
