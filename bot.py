@@ -13594,18 +13594,22 @@ async def successful_payment_handler(message: Message):
         reply_markup=home_kb(uid),
     )
 
-    # Уведомляем админа
+    # Уведомляем всех админов о покупке через ЮKassa
+    _up = user_profiles.get(uid, {})
+    _uname = _up.get("name") or _up.get("username") or f"uid {uid}"
+    _total_subs = sum(1 for s in user_subscriptions.values() if s.get("expires", msk_now()) > msk_now())
+    _admin_text = (
+        f'<tg-emoji emoji-id="{PE["money_receive"]}">🏧</tg-emoji> <b>Новая оплата! (ЮKassa)</b>\n\n'
+        f'<tg-emoji emoji-id="{PE["profile"]}">👤</tg-emoji> Пользователь: <a href="tg://user?id={uid}">{_uname}</a> (<code>{uid}</code>)\n'
+        f'<tg-emoji emoji-id="{PE["tag"]}">🏷</tg-emoji> Тариф: <b>{plan["name"]}</b> ({plan["days"]} дней)\n'
+        f'<tg-emoji emoji-id="{PE["money"]}">🪙</tg-emoji> Сумма: <b>{payment.total_amount / 100} ₽</b>\n'
+        f'<tg-emoji emoji-id="{PE["calendar"]}">📅</tg-emoji> Подписка до: <b>{new_exp.strftime("%d.%m.%Y %H:%M")}</b>\n'
+        f'<tg-emoji emoji-id="{PE["info"]}">ℹ</tg-emoji> Charge ID: <code>{charge_id}</code>\n'
+        f'<tg-emoji emoji-id="{PE["stats"]}">📊</tg-emoji> Всего активных подписок: <b>{_total_subs}</b>'
+    )
     for admin_id in ADMIN_IDS:
         try:
-            await bot.send_message(
-                admin_id,
-                f"💰 <b>Новая оплата!</b>\n\n"
-                f"👤 uid: <code>{uid}</code>\n"
-                f"📋 Тариф: <b>{plan['name']}</b>\n"
-                f"💵 Сумма: <b>{payment.total_amount / 100} ₽</b>\n"
-                f"🔑 Charge ID: <code>{charge_id}</code>",
-                parse_mode="HTML",
-            )
+            await bot.send_message(admin_id, _admin_text, parse_mode="HTML")
         except Exception:
             pass
 
@@ -13730,9 +13734,26 @@ async def show_admin_panel(msg_or_cb):
         [InlineKeyboardButton(text="💎 Подписки",         callback_data="admin_subs")],
         [InlineKeyboardButton(text="🎁 Выдать лимиты",   callback_data="admin_give_limits"),
          InlineKeyboardButton(text="✂️ Забрать лимиты",  callback_data="admin_take_limits")],
-        [InlineKeyboardButton(text="📢 Рассылка",        callback_data="admin_broadcast"),
-         InlineKeyboardButton(text="🧪 Тест моделей",   callback_data="admin_test_models")],
-        [InlineKeyboardButton(text="🔑 API ключи",       callback_data="admin_apikeys")],
+        [InlineKeyboardButton(
+            text="Рассылка",
+            callback_data="admin_broadcast",
+            icon_custom_emoji_id=PE["megaphone"]
+         ),
+         InlineKeyboardButton(
+            text="Тест моделей",
+            callback_data="admin_test_models",
+            icon_custom_emoji_id=PE["bot"]
+         )],
+        [InlineKeyboardButton(
+            text="Графики",
+            callback_data="admin_charts_refresh",
+            icon_custom_emoji_id=PE["stats"]
+         ),
+         InlineKeyboardButton(
+            text="API ключи",
+            callback_data="admin_apikeys",
+            icon_custom_emoji_id=PE["link"]
+         )],
         [InlineKeyboardButton(text="⚙️ Дополнительно",  callback_data="admin_extra")],
         [InlineKeyboardButton(text="🔌 Сервисы вкл/выкл", callback_data="admin_services")],
         [InlineKeyboardButton(text="🗑 Сброс памяти",   callback_data="admin_reset_memory")],
@@ -19236,31 +19257,65 @@ async def admin_test_models(callback: CallbackQuery):
     )
 
     results = []
-    for model_key, model_info in test_models.items():
-        label = model_info["label"]
-        try:
-            # Для reasoning моделей нужно больше ресурсов (reasoning-модели)
-            _is_reasoning = any(s in model_info["name"] for s in ["R1", "GLM-4.7", "GLM-4.6"])
-            _test_tokens = 800 if _is_reasoning else 60
-            test_msgs = [{"role": "user", "content": TEST_PROMPT}]
-            ans = await call_chat(test_msgs, model_key, max_tokens=_test_tokens)
-            # Берём только первые 80 символов ответа
-            short_ans = ans.strip().replace("\n", " ")[:80]
-            results.append(f"✅ <b>{label}</b>\n   → <i>{short_ans}</i>")
-        except Exception as e:
-            err_short = str(e)[:60]
-            results.append(f"❌ <b>{label}</b>\n   → <code>{err_short}</code>")
+    ok_count = 0
+    fail_count = 0
 
-    await wait_msg.delete()
+    for i, (model_key, model_info) in enumerate(test_models.items(), 1):
+        label = model_info.get("label", model_key)
+        # Обновляем прогресс каждые 3 модели
+        if i % 3 == 1:
+            try:
+                await wait_msg.edit_text(
+                    f'<tg-emoji emoji-id="{PE["loading"]}">🔄</tg-emoji> <b>Тест нейросетей</b>\n\n'
+                    f"Проверяю <code>{i}/{len(test_models)}</code>: <b>{label}</b>\n"
+                    f"✅ Рабочих: <code>{ok_count}</code>  ❌ Упавших: <code>{fail_count}</code>",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+
+        try:
+            _is_reasoning = any(s in model_info.get("name","") for s in ["R1", "GLM-4.7", "GLM-4.6", "o1", "o3"])
+            _test_tokens = 200 if _is_reasoning else 60
+            test_msgs = [{"role": "user", "content": TEST_PROMPT}]
+            # Таймаут 30 секунд на каждую модель чтобы не висеть вечно
+            ans = await asyncio.wait_for(
+                call_chat(test_msgs, model_key, max_tokens=_test_tokens),
+                timeout=30
+            )
+            short_ans = ans.strip().replace("\n", " ")[:80]
+            results.append(f'<tg-emoji emoji-id="{PE["check"]}">✅</tg-emoji> <b>{label}</b>\n   → <i>{short_ans}</i>')
+            ok_count += 1
+        except asyncio.TimeoutError:
+            results.append(f'<tg-emoji emoji-id="{PE["clock"]}">⏰</tg-emoji> <b>{label}</b>\n   → <code>Таймаут (>30с)</code>')
+            fail_count += 1
+        except Exception as e:
+            err_short = str(e)[:80]
+            results.append(f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> <b>{label}</b>\n   → <code>{err_short}</code>')
+            fail_count += 1
+
+    try:
+        await wait_msg.delete()
+    except Exception:
+        pass
 
     # Разбиваем на чанки если много моделей
-    header = f"🧪 <b>Результаты теста ({len(test_models)} моделей)</b>\n\n"
+    header = (
+        f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>Тест нейросетей завершён</b>\n'
+        f"✅ Рабочих: <b>{ok_count}</b>  ❌ Недоступных: <b>{fail_count}</b>  "
+        f"из <b>{len(test_models)}</b>\n"
+        f"{'─' * 24}\n\n"
+    )
     body = "\n\n".join(results)
     full_text = header + body
     chunks = [full_text[i:i+3800] for i in range(0, len(full_text), 3800)]
     for ci, chunk in enumerate(chunks):
         kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="◀️ Назад", callback_data="menu_admin"),
+            InlineKeyboardButton(
+                text="Назад",
+                callback_data="menu_admin",
+                icon_custom_emoji_id="5892627217459876335"
+            ),
         ]]) if ci == len(chunks) - 1 else None
         await callback.message.answer(chunk, parse_mode="HTML", reply_markup=kb)
 
@@ -20249,23 +20304,51 @@ async def platega_callback_handler(request: aiohttp_web.Request) -> aiohttp_web.
             asyncio.create_task(_save_payment())
 
         exp = sub_expires_str(uid)
+
+        # Уведомляем пользователя
         try:
             await bot.send_message(
                 uid,
-                f"✅ <b>Оплата прошла!</b>\n\n"
-                f"💎 Тариф: <b>{plan['name']}</b>\n"
-                f"📅 Активна до: <code>{exp}</code>\n\n"
-                f"Все возможности разблокированы. Приятного пользования!",
+                premium_html(
+                    f"✅ <b>Оплата прошла!</b>\n\n"
+                    f"💎 Тариф: <b>{plan['name']}</b>\n"
+                    f"📅 Действует до: <b>{new_exp.strftime('%d.%m.%Y %H:%M')}</b>\n\n"
+                    f"Все возможности разблокированы. Приятного пользования 🚀"
+                ),
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="🏠 Главное меню", callback_data="back_home"),
+                    InlineKeyboardButton(
+                        text="Главное меню",
+                        callback_data="back_home",
+                        icon_custom_emoji_id=PE["home"]
+                    ),
                 ]]),
             )
         except Exception as e:
             logging.error(f"[PLATEGA CB] send_message uid={uid}: {e}")
 
+        # Уведомляем всех админов о покупке через Platega
+        # Пытаемся получить имя пользователя из user_profiles
+        _up = user_profiles.get(uid, {})
+        _uname = _up.get("name") or _up.get("username") or f"uid {uid}"
+        _total_subs = sum(1 for s in user_subscriptions.values() if s.get("expires", msk_now()) > msk_now())
+        _admin_text = (
+            f'<tg-emoji emoji-id="{PE["money_receive"]}">🏧</tg-emoji> <b>Новая оплата! (Platega)</b>\n\n'
+            f'<tg-emoji emoji-id="{PE["profile"]}">👤</tg-emoji> Пользователь: <a href="tg://user?id={uid}">{_uname}</a> (<code>{uid}</code>)\n'
+            f'<tg-emoji emoji-id="{PE["tag"]}">🏷</tg-emoji> Тариф: <b>{plan["name"]}</b> ({plan["days"]} дней)\n'
+            f'<tg-emoji emoji-id="{PE["money"]}">🪙</tg-emoji> Сумма: <b>{plan["price"]} ₽</b>\n'
+            f'<tg-emoji emoji-id="{PE["calendar"]}">📅</tg-emoji> Подписка до: <b>{new_exp.strftime("%d.%m.%Y %H:%M")}</b>\n'
+            f'<tg-emoji emoji-id="{PE["info"]}">ℹ</tg-emoji> Transaction ID: <code>{transaction_id or "—"}</code>\n'
+            f'<tg-emoji emoji-id="{PE["stats"]}">📊</tg-emoji> Всего активных подписок: <b>{_total_subs}</b>'
+        )
+        for _admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(_admin_id, _admin_text, parse_mode="HTML")
+            except Exception as _ae:
+                logging.error(f"[PLATEGA CB] notify admin {_admin_id}: {_ae}")
+
     except Exception as e:
-        logging.error(f"[PLATEGA CB] handler error: {e}")
+        logging.error(f"[PLATEGA CB] handler error: {e}", exc_info=True)
 
     return aiohttp_web.Response(text="ok")
 
@@ -22297,8 +22380,8 @@ async def _send_admin_charts(message: Message, uid: int):
                 GROUP BY hour ORDER BY hour
             """)
             total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
-            sub_users   = await conn.fetchval("SELECT COUNT(*) FROM users WHERE sub_expires::timestamptz > NOW()")
-            new_7d      = await conn.fetchval("SELECT COUNT(*) FROM users WHERE joined >= NOW()::date - 7")
+            sub_users   = await conn.fetchval("SELECT COUNT(*) FROM users WHERE sub_expires IS NOT NULL AND sub_expires != '' AND to_timestamp(NULLIF(sub_expires,''),'DD.MM.YYYY HH24:MI') > NOW()")
+            new_7d      = await conn.fetchval("SELECT COUNT(*) FROM users WHERE joined >= to_char(NOW() - INTERVAL '7 days', 'DD.MM.YYYY')")
 
         import io as _io
         fig = plt.figure(figsize=(14, 10), facecolor='#1a1a2e')
@@ -22374,8 +22457,17 @@ async def _send_admin_charts(message: Message, uid: int):
             ]])
         )
     except Exception as e:
-        logging.error(f"admin_charts: {e}")
-        await message.answer(f"❌ Ошибка: {e}")
+        import traceback as _tbc
+        logging.error(f"admin_charts: {e}", exc_info=True)
+        await message.answer(
+            f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> <b>Ошибка при генерации графиков</b>\n\n'
+            f"<code>{str(e)[:300]}</code>\n\n"
+            f"Проверь наличие таблицы <code>model_stats</code> в БД.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Назад", callback_data="menu_admin", icon_custom_emoji_id="5892627217459876335"),
+            ]])
+        )
 
 
 @dp.message(Command("admin_charts"))
