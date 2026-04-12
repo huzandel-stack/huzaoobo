@@ -17924,12 +17924,8 @@ async def analyze_photos_with_custom_prompt(message: Message, uid: int, buffer_i
     """
     Отправляет ВСЕ фото из пакета В ОДИН запрос к vision-модели
     вместе с произвольным текстом пользователя.
-
-    Вызывается:
-      • после нажатия «✍️ Своё пожелание» + ввода текста
-      • если пользователь написал текст пока бот ждал (photo_custom_prompt_pending)
+    Возвращает единый ответ с полным набором кнопок (Красиво / DOCX / Меню).
     """
-    # Проверяем наличие пакета
     if uid not in photo_batches or buffer_id not in photo_batches[uid]:
         await message.answer("❌ Пакет фото не найден или уже обработан.", parse_mode="HTML")
         return
@@ -17943,10 +17939,8 @@ async def analyze_photos_with_custom_prompt(message: Message, uid: int, buffer_i
         return
 
     vision_order = get_photo_vision_candidates(uid)
-    vision_key = vision_order[0]
-    model_label = MODELS.get(vision_key, {}).get("label", vision_key)
+    model_label = MODELS.get(vision_order[0], {}).get("label", vision_order[0])
 
-    # Индикатор загрузки
     wait_msg = await message.answer(
         f"⏳ <i>Обрабатываю {len(photos)} фото по вашему запросу...</i>\n"
         f"🤖 Модель: <code>{model_label}</code>",
@@ -17954,62 +17948,80 @@ async def analyze_photos_with_custom_prompt(message: Message, uid: int, buffer_i
     )
 
     try:
-        # ── Формируем ОДИН контент-запрос со всеми фото сразу ────────────────
-        content: list[dict] = []
-
-        # Сначала текст пользователя (лучше воспринимается моделью первым)
-        prompt_text = user_prompt.strip() if user_prompt.strip() else (
+        prompt_text = user_prompt.strip() or (
             "Опиши подробно что изображено на фото. "
             "Если фото несколько — дай общий анализ по всем."
         )
-        content.append({"type": "text", "text": prompt_text})
 
-        # Добавляем все фото (ограничение: не более PHOTO_BATCH_MAX_PHOTOS)
+        # ── ВАЖНО: сначала ВСЕ фото, текст-запрос — последним ───────────────
+        # Многие vision-модели (Claude, GPT-4o) лучше следуют инструкции
+        # когда картинки идут ДО текстового промпта.
+        content: list[dict] = []
         for photo in photos[:PHOTO_BATCH_MAX_PHOTOS]:
             content.append({
                 "type": "image_url",
                 "image_url": {"url": f"data:image/jpeg;base64,{photo.img_b64}"}
             })
+        content.append({"type": "text", "text": prompt_text})
 
         vision_msg = [{"role": "user", "content": content}]
 
-        # ── Единый вызов модели для всех фото ────────────────────────────────
         ans, used_model, _ = await call_vision_with_fallback(
-            uid,
-            vision_msg,
-            max_tokens=3000,
-            vision_order=vision_order,
+            uid, vision_msg, max_tokens=3500, vision_order=vision_order
         )
 
         used_label = MODELS.get(used_model, {}).get("label", used_model)
-        photo_word = "фото" if len(photos) == 1 else "фото"  # можно расширить склонение
+        n = len(photos)
+        photo_word = "фото" if n == 1 else "фото"
 
-        # Формируем итоговый ответ
+        # Сохраняем в last_responses (нужно для DOCX и Красиво)
+        last_responses[uid] = {
+            "q": f"[{n} {photo_word}] {user_prompt[:100]}",
+            "a": ans,
+            "model_label": used_label,
+            "model_key": used_model,
+        }
+
+        # Сохраняем контекст фото для follow-up вопросов
+        if uid not in user_memory:
+            user_memory[uid] = deque(maxlen=20)
+        user_memory[uid].append({"role": "user", "content": f"[{n} фото] {prompt_text[:200]}"})
+        user_memory[uid].append({"role": "assistant", "content": ans})
+
+        # Списываем лимит
+        spend_limit(uid, used_model)
+        asyncio.create_task(db_save_user(uid))
+
         result_header = (
-            f"✍️ <b>Ответ по запросу</b> ({len(photos)} {photo_word})\n"
+            f"✍️ <b>Ответ по запросу</b> ({n} {photo_word})\n"
             f"<i>{used_label}</i>\n\n"
         )
-        html_ans = md_to_html(ans) if callable(globals().get("md_to_html")) else ans
+        html_ans = md_to_html(ans)
+
+        # Строим клавиатуру: Красиво + стандартные кнопки save_kb
+        _kb = save_kb(uid)
+        try:
+            _vurl = store_answer(ans, used_label, used_model)
+            _kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🌐 Красиво", url=_vurl)]
+            ] + _kb.inline_keyboard)
+        except Exception:
+            pass
 
         try:
             await wait_msg.delete()
         except Exception:
             pass
 
+        # Отправляем с полным набором кнопок
         try:
             await message.answer(
-                result_header + html_ans[:3600],
+                result_header + html_ans[:3800],
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text="❌ Закрыть",
-                        callback_data=f"photo_packet_close_{buffer_id}"
-                    )
-                ]])
+                reply_markup=_kb
             )
         except Exception:
-            # HTML-fallback если разметка сломана
-            await message.answer(result_header + ans[:3600])
+            await message.answer(result_header + ans[:3800], reply_markup=_kb)
 
     except Exception as e:
         try:
@@ -18019,7 +18031,6 @@ async def analyze_photos_with_custom_prompt(message: Message, uid: int, buffer_i
         logging.error(f"analyze_photos_with_custom_prompt error: {e}")
         await message.answer(f"❌ Ошибка обработки: {str(e)[:200]}", parse_mode="HTML")
     finally:
-        # Очищаем оба словаря и сам пакет
         user_photo_prompts.pop(uid, None)
         photo_custom_prompt_pending.pop(uid, None)
         _cleanup_photo_batch(uid, buffer_id)
