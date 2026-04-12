@@ -461,7 +461,7 @@ YOOKASSA_TOKEN = os.getenv("YOOKASSA_TOKEN", "")  # пусто = режим ру
 # ── Platega (прямые платежи) ──────────────────────────────────────
 PLATEGA_MERCHANT_ID = os.getenv("PLATEGA_MERCHANT_ID", "")  # Merchant ID из ЛК Platega
 PLATEGA_SECRET      = os.getenv("PLATEGA_SECRET", "")       # X-Secret из ЛК Platega
-PLATEGA_API_URL     = "https://api.platega.io/v1/payment"
+PLATEGA_API_URL     = "https://app.platega.io/transaction/process"
 
 # ── Webhook security ──────────────────────────────────────────────
 # Генерируй ОДИН РАЗ: python -c "import secrets; print(secrets.token_hex(32))"
@@ -13350,22 +13350,22 @@ async def cb_pay_platega(callback: CallbackQuery):
     bot_info  = await bot.get_me()
     return_url = f"https://t.me/{bot_info.username}?start=sub_check"
 
-    # Актуальный payload Platega v1
+    # Payload по актуальной документации Platega (app.platega.io/transaction/process)
     payload = {
-        "amount":      int(plan["price"]),          # целое, в рублях
-        "currency":    "RUB",
-        "order_id":    order_id,
+        "paymentMethod":  2,                        # 2 = SBPQR (СБП)
+        "paymentDetails": {
+            "amount":   int(plan["price"]),
+            "currency": "RUB",
+        },
         "description": f"ХУЗА AI — {plan['name']} ({plan['days']} дней)",
-        "customer":    {"uid": str(uid)},
-        "meta":        {"plan": plan_key, "uid": uid},
-        "success_url": return_url,
-        "fail_url":    return_url,
-        "webhook_url": f"https://huzaoobo-production.up.railway.app/platega_webhook",
+        "return":      return_url,
+        "failedUrl":   return_url,
+        "payload":     order_id,
     }
     headers = {
-        "Content-Type":  "application/json",
-        "Authorization": f"Bearer {PLATEGA_SECRET}",
-        "X-Merchant-Id": PLATEGA_MERCHANT_ID,
+        "Content-Type": "application/json",
+        "X-MerchantId": PLATEGA_MERCHANT_ID,
+        "X-Secret":     PLATEGA_SECRET,
     }
 
     logging.info(f"[PLATEGA] Создаю платёж uid={uid} plan={plan_key} order={order_id} "
@@ -20174,7 +20174,8 @@ async def platega_callback_handler(request: aiohttp_web.Request) -> aiohttp_web.
     """
     Вебхук от Platega: POST /platega_callback
     Заголовки: X-MerchantId, X-Secret
-    Body JSON: { "status": "CONFIRMED", "payload": "sub_week_123456", "transactionId": "...", ... }
+    Body JSON: { "status": "CONFIRMED", "payload": "huza_week_123456_1776014377", ... }
+    payload format: huza_{plan_key}_{uid}_{timestamp}
     """
     try:
         # Проверяем секрет
@@ -20187,13 +20188,14 @@ async def platega_callback_handler(request: aiohttp_web.Request) -> aiohttp_web.
         logging.info(f"[PLATEGA CB] body={body}")
 
         status  = body.get("status", "")
-        payload = body.get("payload", "")   # формат: sub_{plan_key}_{uid}
+        payload = body.get("payload", "")   # формат: huza_{plan_key}_{uid}_{timestamp}
 
         if status != "CONFIRMED":
             return aiohttp_web.Response(text="ok")
 
+        # Парсим order_id формата: huza_{plan_key}_{uid}_{timestamp}
         parts = str(payload).split("_")
-        if len(parts) < 3 or parts[0] != "sub":
+        if len(parts) < 4 or parts[0] != "huza":
             logging.warning(f"[PLATEGA CB] неверный payload: {payload!r}")
             return aiohttp_web.Response(text="ok")
 
