@@ -340,7 +340,7 @@ BUTTON_ICON_HINTS: dict[str, str | None] = {
 
 _PREMIUM_TEXT_TOKENS = tuple(sorted(PREMIUM_TEXT_HINTS, key=len, reverse=True))
 _BUTTON_TOKENS = tuple(sorted(BUTTON_ICON_HINTS, key=len, reverse=True))
-PREMIUM_BUTTON_ICON_ONLY = True  # всегда включено — премиум иконки в кнопках
+PREMIUM_BUTTON_ICON_ONLY = False  # обычные эмодзи в кнопках
 
 
 def premium_emoji(name: str, fallback: str = "•") -> str:
@@ -4897,36 +4897,36 @@ def main_reply_kb(uid: int) -> ReplyKeyboardMarkup:
 
 
 def home_kb(uid: int) -> InlineKeyboardMarkup:
-    sub_text = "Подписка активна" if has_active_sub(uid) else "Купить подписку"
+    sub_text = "✅ Подписка активна" if has_active_sub(uid) else "💎 Купить подписку"
     lb = user_profiles.get(uid, {}).get("last_bonus")
     can_bonus = (lb is None) or (isinstance(lb, datetime.datetime) and (msk_now() - lb).total_seconds() >= 86400)
-    bonus_text = "Забрать бонус!" if can_bonus else "Бонус"
+    bonus_text = "🎁 Забрать бонус!" if can_bonus else "🎁 Бонус"
     extra = user_extra_requests.get(uid, 0)
     built = [
         [
-            InlineKeyboardButton(text="Написать",          callback_data="menu_ask",     icon_custom_emoji_id=PE["write"]),
-            InlineKeyboardButton(text="Профиль",           callback_data="menu_profile", icon_custom_emoji_id=PE["profile"]),
+            InlineKeyboardButton(text="✍️ Написать",          callback_data="menu_ask",     icon_custom_emoji_id=None),
+            InlineKeyboardButton(text="👤 Профиль",           callback_data="menu_profile", icon_custom_emoji_id=None),
         ],
         [
-            InlineKeyboardButton(text="Картинки · Видео",  callback_data="menu_extra",   icon_custom_emoji_id=PE["media"]),
+            InlineKeyboardButton(text="🖼 Картинки · Видео",  callback_data="menu_extra",   icon_custom_emoji_id=None),
         ],
         [
-            InlineKeyboardButton(text="Очистить память",   callback_data="clear_memory", icon_custom_emoji_id=PE["trash"]),
-            InlineKeyboardButton(text="Избранное",         callback_data="menu_favorites", icon_custom_emoji_id=PE["tag"]),
+            InlineKeyboardButton(text="🗑 Очистить память",   callback_data="clear_memory", icon_custom_emoji_id=None),
+            InlineKeyboardButton(text="🏷 Избранное",         callback_data="menu_favorites", icon_custom_emoji_id=None),
         ],
         [
-            InlineKeyboardButton(text="Поддержка",         callback_data="menu_support", icon_custom_emoji_id=PE["megaphone"]),
-            InlineKeyboardButton(text=sub_text,            callback_data="sub_menu",     icon_custom_emoji_id=PE["wallet"]),
+            InlineKeyboardButton(text="📣 Поддержка",         callback_data="menu_support", icon_custom_emoji_id=None),
+            InlineKeyboardButton(text=sub_text,               callback_data="sub_menu",     icon_custom_emoji_id=None),
         ],
         [
-            InlineKeyboardButton(text=bonus_text,          callback_data="menu_daily_bonus", icon_custom_emoji_id=PE["gift"]),
-            InlineKeyboardButton(text=f"Запросы{' +'+str(extra) if extra else ''}", callback_data="menu_token_packs", icon_custom_emoji_id=PE["money"]),
+            InlineKeyboardButton(text=bonus_text,             callback_data="menu_daily_bonus", icon_custom_emoji_id=None),
+            InlineKeyboardButton(text=f"💰 Запросы{' +'+str(extra) if extra else ''}", callback_data="menu_token_packs", icon_custom_emoji_id=None),
         ],
     ]
     if uid in ADMIN_IDS:
         built.append([
-            InlineKeyboardButton(text="Админ",   callback_data="menu_admin",          icon_custom_emoji_id=PE["settings"]),
-            InlineKeyboardButton(text="Графики", callback_data="admin_charts_refresh", icon_custom_emoji_id=PE["chart_up"]),
+            InlineKeyboardButton(text="⚙️ Админ",   callback_data="menu_admin",          icon_custom_emoji_id=None),
+            InlineKeyboardButton(text="📊 Графики", callback_data="admin_charts_refresh", icon_custom_emoji_id=None),
         ])
     return InlineKeyboardMarkup(inline_keyboard=built)
 
