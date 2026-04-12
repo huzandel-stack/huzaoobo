@@ -2393,6 +2393,7 @@ dp.message.middleware(TermsMiddleware())
 dp.callback_query.middleware(TermsMiddleware())
 # Улучшенный антифлуд с поддержкой callback cooldown
 _antispam = AntispamMiddleware(cooldown_cb=1.5, msg_limit=8, window_sec=10)
+dp.message.middleware(_antispam)
 dp.callback_query.middleware(_antispam)
 
 def safe_task(coro):
@@ -18643,6 +18644,32 @@ async def _analyze_photo(message, uid: int, img_b64: str, caption: str, user_cap
 # 🎤 ГОЛОСОВЫЕ
 # ==================================================================
 
+GROQ_API_KEY  = os.getenv("GROQ_API_KEY", "")
+GROQ_STT_URL  = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_STT_MODEL = "whisper-large-v3-turbo"
+
+async def transcribe_voice_groq(ogg_bytes: bytes, filename: str = "voice.ogg") -> str:
+    """Транскрибирует голос через Groq Whisper (быстро, поддерживает русский)."""
+    if not GROQ_API_KEY:
+        raise RuntimeError("GROQ_API_KEY не задан в Railway Variables.")
+    form = aiohttp.FormData()
+    form.add_field("file", ogg_bytes, filename=filename, content_type="audio/ogg")
+    form.add_field("model", GROQ_STT_MODEL)
+    form.add_field("language", "ru")
+    form.add_field("response_format", "json")
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        async with session.post(GROQ_STT_URL, data=form, headers=headers) as resp:
+            if resp.status != 200:
+                err = await resp.text()
+                raise RuntimeError(f"Groq STT HTTP {resp.status}: {err[:200]}")
+            data = await resp.json()
+            text = data.get("text", "").strip()
+            if not text:
+                raise RuntimeError("Groq вернул пустую транскрипцию")
+            return text
+
+
 @dp.message(F.voice)
 async def handle_voice(message: Message):
     uid = message.from_user.id
@@ -18678,6 +18705,16 @@ async def handle_voice(message: Message):
                 use_path = voice_path
                 use_fname = "voice.ogg"
                 use_ctype = "audio/ogg"
+
+            # Попытка 0: Groq Whisper (быстрее всего, приоритет)
+            if GROQ_API_KEY:
+                try:
+                    text = await transcribe_voice_groq(buf.getvalue())
+                    if text:
+                        logging.info(f"Groq Whisper success uid={uid}")
+                except Exception as e_groq:
+                    last_err = f"Groq: {str(e_groq)[:150]}"
+                    logging.warning(f"Groq STT failed uid={uid}: {e_groq}")
 
             # Попытка 1: OnlySQ — whisper-large-v3 (основной, надёжнее)
             timeout_sq = aiohttp.ClientTimeout(total=60, connect=15, sock_read=50)
@@ -21273,421 +21310,6 @@ async def photo_packet_custom_prompt_cb(callback: CallbackQuery):
         )
 
 
-# =============================================================================
-# ПАТЧ 4: ГОЛОСОВОЙ ВВОД ЧЕРЕЗ GROQ WHISPER
-# =============================================================================
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")  # добавь в Railway Variables
-GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
-GROQ_STT_MODEL = "whisper-large-v3-turbo"
-
-async def transcribe_voice_groq(ogg_bytes: bytes, filename: str = "voice.ogg") -> str:
-    """
-    Отправляет голосовой файл (OGG/MP3/WAV) в Groq Whisper и возвращает транскрипцию.
-    Модель: whisper-large-v3-turbo (самая быстрая, поддерживает русский).
-    """
-    if not GROQ_API_KEY:
-        raise RuntimeError(
-            "GROQ_API_KEY не задан. Добавь переменную в Railway → Variables."
-        )
-    form = aiohttp.FormData()
-    form.add_field(
-        "file",
-        ogg_bytes,
-        filename=filename,
-        content_type="audio/ogg",
-    )
-    form.add_field("model", GROQ_STT_MODEL)
-    form.add_field("language", "ru")
-    form.add_field("response_format", "json")
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=30)
-    ) as session:
-        async with session.post(GROQ_STT_URL, data=form, headers=headers) as resp:
-            if resp.status != 200:
-                err = await resp.text()
-                raise RuntimeError(f"Groq STT HTTP {resp.status}: {err[:200]}")
-            data = await resp.json()
-            text = data.get("text", "").strip()
-            if not text:
-                raise RuntimeError("Groq вернул пустую транскрипцию")
-            return text
-
-
-@dp.message(F.voice)
-async def handle_voice_message(message: Message):
-    """
-    Обработчик голосовых сообщений:
-    1. Скачивает OGG-файл
-    2. Транскрибирует через Groq Whisper
-    3. Прогоняет через выбранную модель ИИ и отвечает
-    """
-    uid = message.from_user.id
-
-    if not GROQ_API_KEY:
-        await message.answer(
-            f'<tg-emoji emoji-id="{PE["info"]}">ℹ</tg-emoji> '
-            f"<b>Голосовой ввод временно недоступен.</b>\n"
-            f"Ключ Groq не настроен на сервере.",
-            parse_mode="HTML",
-        )
-        return
-
-    # Проверяем лимиты
-    if not check_limit(uid, "pro_used"):
-        await message.answer(
-            f'<tg-emoji emoji-id="{PE["cross"]}">✗</tg-emoji> '
-            f"<b>Лимит запросов исчерпан.</b>\n\n"
-            f"Обнови подписку или подожди сброса лимита.",
-            parse_mode="HTML",
-        )
-        return
-
-    status_msg = await message.answer(
-        f'<tg-emoji emoji-id="{PE["loading"]}">↻</tg-emoji> '
-        f"<b>Распознаю речь...</b>",
-        parse_mode="HTML",
-    )
-    try:
-        voice = message.voice
-        tg_file = await bot.get_file(voice.file_id)
-        ogg_bytes_io = io.BytesIO()
-        await bot.download_file(tg_file.file_path, destination=ogg_bytes_io)
-        ogg_bytes = ogg_bytes_io.getvalue()
-
-        transcribed_text = await transcribe_voice_groq(ogg_bytes)
-
-        await status_msg.edit_text(
-            f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> '
-            f"<b>Распознано:</b>\n"
-            f"<i>{transcribed_text[:300]}</i>\n\n"
-            f'<tg-emoji emoji-id="{PE["loading"]}">↻</tg-emoji> '
-            f"<b>Думаю...</b>",
-            parse_mode="HTML",
-        )
-
-        model_key = resolve_model_key(uid, text=transcribed_text)
-        model_info = MODELS.get(model_key, {})
-        model_label = model_info.get("label", model_key)
-
-        history = list(user_history.get(uid, []))
-        messages_for_ai = [{"role": h["role"] if "role" in h else "user", "content": h.get("q", h.get("content", ""))} for h in history[-10:]]
-        messages_for_ai.append({"role": "user", "content": transcribed_text})
-
-        ai_answer = await call_chat(messages_for_ai, model_key, max_tokens=1500)
-
-        if uid not in user_history:
-            user_history[uid] = []
-        user_history[uid].append({"q": transcribed_text, "a": ai_answer, "model": model_key, "ts": msk_now().strftime("%d.%m.%Y %H:%M")})
-        user_history[uid] = user_history[uid][-10:]
-        spend_limit(uid, model_key)
-
-        response_text = (
-            f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> '
-            f"<b>Вы сказали:</b> <i>{transcribed_text[:200]}</i>\n"
-            f"<b>Модель:</b> {model_label}\n\n"
-            f"{ai_answer}"
-        )
-        await status_msg.edit_text(
-            premium_html(response_text[:4000]),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="↩ Ещё вопрос",
-                    callback_data="back_home",
-                    icon_custom_emoji_id=PE["loading"],
-                ),
-            ]]),
-        )
-    except RuntimeError as e:
-        err_text = str(e)
-        logging.warning(f"[voice] uid={uid} ошибка: {err_text}")
-        await status_msg.edit_text(
-            f'<tg-emoji emoji-id="{PE["cross"]}">✗</tg-emoji> '
-            f"<b>Не удалось распознать голос</b>\n\n"
-            f"<i>{err_text[:300]}</i>",
-            parse_mode="HTML",
-        )
-    except Exception as e:
-        logging.exception(f"[voice] uid={uid} неожиданная ошибка: {e}")
-        try:
-            await status_msg.edit_text(
-                f'<tg-emoji emoji-id="{PE["cross"]}">✗</tg-emoji> '
-                f"<b>Ошибка обработки голоса</b>",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-
-
-# =============================================================================
-# ПАТЧ 5: КОМАНДА /stats — статистика пользователя
-# =============================================================================
-# =============================================================================
-# ПАТЧ 6: КОМАНДА /export — экспорт истории чата в TXT
-# =============================================================================
-
-# ══════════════════════════════════════════════════════════════════════
-# 🎙 ГОЛОСОВОЙ ВВОД ЧЕРЕЗ GROQ WHISPER (ПАТЧ 4)
-# ══════════════════════════════════════════════════════════════════════
-GROQ_API_KEY  = os.getenv("GROQ_API_KEY", "")  # добавь в Railway Variables
-GROQ_STT_URL  = "https://api.groq.com/openai/v1/audio/transcriptions"
-GROQ_STT_MODEL = "whisper-large-v3-turbo"
-
-async def transcribe_voice_groq(ogg_bytes: bytes, filename: str = "voice.ogg") -> str:
-    """Отправляет голосовой файл в Groq Whisper и возвращает транскрипцию."""
-    if not GROQ_API_KEY:
-        raise RuntimeError(
-            "GROQ_API_KEY не задан. Добавь переменную в Railway → Variables."
-        )
-    form = aiohttp.FormData()
-    form.add_field("file", ogg_bytes, filename=filename, content_type="audio/ogg")
-    form.add_field("model", GROQ_STT_MODEL)
-    form.add_field("language", "ru")
-    form.add_field("response_format", "json")
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
-        async with session.post(GROQ_STT_URL, data=form, headers=headers) as resp:
-            if resp.status != 200:
-                err = await resp.text()
-                raise RuntimeError(f"Groq STT HTTP {resp.status}: {err[:200]}")
-            data = await resp.json()
-            text = data.get("text", "").strip()
-            if not text:
-                raise RuntimeError("Groq вернул пустую транскрипцию")
-            return text
-
-
-@dp.message(F.voice)
-async def handle_voice_message(message: Message):
-    """
-    Обработчик голосовых сообщений:
-    1. Скачивает OGG-файл
-    2. Транскрибирует через Groq Whisper
-    3. Прогоняет через выбранную модель ИИ
-    """
-    uid = message.from_user.id
-
-    if not check_limit(uid, "pro_used"):
-        await message.answer(
-            f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> '
-            f'<b>Лимит запросов исчерпан.</b>\n\nОбнови подписку или подожди сброса лимита.',
-            parse_mode="HTML",
-        )
-        return
-
-    if not GROQ_API_KEY:
-        await message.answer(
-            f'<tg-emoji emoji-id="{PE["info"]}">ℹ</tg-emoji> '
-            f'<b>Голосовой ввод временно недоступен.</b>\nКлюч Groq не настроен на сервере.',
-            parse_mode="HTML",
-        )
-        return
-
-    status_msg = await message.answer(
-        f'<tg-emoji emoji-id="{PE["loading"]}">🔄</tg-emoji> <b>Распознаю речь...</b>',
-        parse_mode="HTML",
-    )
-    try:
-        voice = message.voice
-        tg_file = await bot.get_file(voice.file_id)
-        ogg_bytes_io = io.BytesIO()
-        await bot.download_file(tg_file.file_path, destination=ogg_bytes_io)
-        ogg_bytes = ogg_bytes_io.getvalue()
-
-        transcribed_text = await transcribe_voice_groq(ogg_bytes)
-
-        await status_msg.edit_text(
-            f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> <b>Распознано:</b>\n'
-            f'<i>{transcribed_text[:300]}</i>\n\n'
-            f'<tg-emoji emoji-id="{PE["loading"]}">🔄</tg-emoji> <b>Думаю...</b>',
-            parse_mode="HTML",
-        )
-
-        model_key = resolve_model_key(uid, text=transcribed_text)
-        model_info = MODELS.get(model_key, {})
-        model_label = model_info.get("label", model_key)
-
-        history = list(user_history.get(uid, []))
-        messages_for_ai = [{"role": h["role"], "content": h["content"]} for h in history if "role" in h]
-        messages_for_ai.append({"role": "user", "content": transcribed_text})
-
-        ai_answer = await call_chat(messages_for_ai, model_key, max_tokens=1500)
-
-        if uid not in user_history:
-            user_history[uid] = []
-        user_history[uid].append({"role": "user", "content": transcribed_text})
-        user_history[uid].append({"role": "assistant", "content": ai_answer})
-        user_history[uid] = user_history[uid][-20:]
-
-        spend_limit(uid, model_key)
-
-        response_text = (
-            f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> '
-            f'<b>Вы сказали:</b> <i>{transcribed_text[:200]}</i>\n'
-            f'<b>Модель:</b> {model_label}\n\n'
-            f'{ai_answer}'
-        )
-        await status_msg.edit_text(
-            premium_html(response_text[:4000]),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                AiogramInlineKeyboardButton(
-                    text="◁ Главная",
-                    callback_data="back_home",
-                    icon_custom_emoji_id="5345906554510012647",
-                ),
-            ]]),
-        )
-    except RuntimeError as e:
-        err_text = str(e)
-        logging.warning(f"[voice] uid={uid} ошибка: {err_text}")
-        try:
-            await status_msg.edit_text(
-                f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> '
-                f'<b>Не удалось распознать голос</b>\n\n<i>{err_text[:300]}</i>',
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-    except Exception as e:
-        logging.exception(f"[voice] uid={uid} неожиданная ошибка: {e}")
-        try:
-            await status_msg.edit_text(
-                f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> <b>Ошибка обработки голоса</b>',
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 📊 КОМАНДА /stats — статистика пользователя (ПАТЧ 5)
-# ══════════════════════════════════════════════════════════════════════
-@dp.message(Command("stats"))
-async def cmd_stats(message: Message):
-    """Красивая карточка статистики пользователя."""
-    uid = message.from_user.id
-    lims = user_limits.get(uid, {})
-    hist = user_history.get(uid, [])
-
-    total_requests = lims.get("total_requests", 0)
-    pro_used       = lims.get("pro_used", 0)
-    img_used       = lims.get("img_used", 0)
-    music_used     = lims.get("music_used", 0)
-
-    level_name, level_next = get_user_level(total_requests)
-    level_progress = ""
-    if level_next:
-        pct = int(min(total_requests / level_next * 100, 100))
-        filled = pct // 10
-        bar = "█" * filled + "░" * (10 - filled)
-        level_progress = f"\n<code>[{bar}]</code> {pct}% до следующего уровня"
-
-    fav_model = "—"
-    model_counts: dict = {}
-    for h in hist:
-        mk = h.get("model", "")
-        if mk:
-            model_counts[mk] = model_counts.get(mk, 0) + 1
-    if model_counts:
-        best_mk = max(model_counts, key=lambda k: model_counts[k])
-        fav_model = MODELS.get(best_mk, {}).get("label", best_mk)
-
-    if has_active_sub(uid):
-        sub_text = (
-            f'<tg-emoji emoji-id="{PE["check"]}">✅</tg-emoji> Активна до '
-            + sub_expires_str(uid)
-        )
-    else:
-        sub_text = f'<tg-emoji emoji-id="{PE["lock_closed"]}">🔒</tg-emoji> Нет подписки'
-
-    profile = user_profiles.get(uid, {})
-    reg_date = profile.get("reg_date", "—")
-
-    text = (
-        f'<tg-emoji emoji-id="{PE["stats"]}">📊</tg-emoji> <b>Статистика</b>\n'
-        f"━━━━━━━━━━━━━━━━━━━\n\n"
-        f'<tg-emoji emoji-id="{PE["profile"]}">👤</tg-emoji> <b>Уровень:</b> {level_name}'
-        f'{level_progress}\n\n'
-        f'<tg-emoji emoji-id="{PE["chart_up"]}">📈</tg-emoji> <b>Всего запросов:</b> {total_requests}\n'
-        f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> <b>Сегодня (чат):</b> {pro_used}\n'
-        f'<tg-emoji emoji-id="{PE["media"]}">🖼</tg-emoji> <b>Генераций фото:</b> {img_used}\n'
-        f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>Любимая модель:</b> {fav_model}\n\n'
-        f'<tg-emoji emoji-id="{PE["gift"]}">🎁</tg-emoji> <b>Подписка:</b> {sub_text}\n'
-        f'<tg-emoji emoji-id="{PE["calendar"]}">📅</tg-emoji> <b>Дата регистрации:</b> {reg_date}\n'
-    )
-    await message.answer(
-        text,
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            AiogramInlineKeyboardButton(
-                text="Профиль",
-                callback_data="show_profile",
-                icon_custom_emoji_id=PE["profile"],
-            ),
-            AiogramInlineKeyboardButton(
-                text="Главная",
-                callback_data="back_home",
-                icon_custom_emoji_id=PE["home"],
-            ),
-        ]]),
-    )
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 📁 КОМАНДА /export — экспорт истории чата (ПАТЧ 6)
-# ══════════════════════════════════════════════════════════════════════
-@dp.message(Command("export"))
-async def cmd_export_history(message: Message):
-    """Экспортирует историю диалогов пользователя в текстовый файл."""
-    uid = message.from_user.id
-    hist = user_history.get(uid, [])
-
-    if not hist:
-        await message.answer(
-            f'<tg-emoji emoji-id="{PE["info"]}">ℹ</tg-emoji> '
-            f'<b>История пуста.</b>\n\nЗадай хотя бы один вопрос — и история появится здесь.',
-            parse_mode="HTML",
-        )
-        return
-
-    lines_out = [
-        "История диалогов — ХУЗА AI",
-        f"Пользователь: {message.from_user.full_name} (@{message.from_user.username or 'no_username'})",
-        f"Всего диалогов: {len(hist)}",
-        "=" * 50,
-        "",
-    ]
-    for i, entry in enumerate(hist, 1):
-        role = entry.get("role", "—")
-        content = entry.get("content", entry.get("q", entry.get("a", "—")))
-        model = entry.get("model", "")
-        model_label = MODELS.get(model, {}).get("label", model) if model else ""
-        lines_out.append(f"[{i}] role={role}" + (f" | {model_label}" if model_label else ""))
-        lines_out.append(str(content))
-        lines_out.append("-" * 40)
-        lines_out.append("")
-
-    file_content = "\n".join(lines_out)
-    filename = f"huza_history_{uid}.txt"
-    file_bytes = file_content.encode("utf-8")
-
-    status = await message.answer(
-        f'<tg-emoji emoji-id="{PE["loading"]}">🔄</tg-emoji> <b>Готовлю файл...</b>',
-        parse_mode="HTML",
-    )
-    await message.answer_document(
-        BufferedInputFile(file_bytes, filename=filename),
-        caption=(
-            f'<tg-emoji emoji-id="{PE["file"]}">📁</tg-emoji> <b>История диалогов</b>\n\n'
-            f'Всего записей: <b>{len(hist)}</b>\n'
-            f'Файл: <code>{filename}</code>'
-        ),
-        parse_mode="HTML",
-    )
-    await status.delete()
-
 async def main():
     global bot, redis_client, api_runner
 
@@ -21775,7 +21397,6 @@ async def main():
         track_background_task(asyncio.create_task(_background_refresh_limits()))
         track_background_task(asyncio.create_task(check_expiring_subs()))
         track_background_task(asyncio.create_task(_img_gen_worker()))
-        track_background_task(asyncio.create_task(_cleanup_ip_windows()))
         track_background_task(asyncio.create_task(_cleanup_ip_windows()))
         # ── Запуск: Webhook или long polling (Задача 5) ──────────────────
         await start_api_server()
