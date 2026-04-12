@@ -456,12 +456,17 @@ SQ_KEY         = _require_env("SQ_KEY")
 
 # ── ЮKassa (Telegram Payments) ────────────────────────────────────
 # Получить токен: @BotFather → /mybots → Bot → Payments → Connect ЮKassa
-YOOKASSA_TOKEN = os.getenv("YOOKASSA_TOKEN", "390540012:LIVE:91556")  # пусто = режим ручной оплаты
+YOOKASSA_TOKEN = os.getenv("YOOKASSA_TOKEN", "")  # пусто = режим ручной оплаты
 
 # ── Platega (прямые платежи) ──────────────────────────────────────
-PLATEGA_MERCHANT_ID = os.getenv("PLATEGA_MERCHANT_ID", "1db27759-f7bd-4067-a43d-95bc2ecf2d8a")  # Merchant ID из ЛК Platega
-PLATEGA_SECRET      = os.getenv("PLATEGA_SECRET", "zeSCSorfEl8qtEUjtuEHzjG6xsIOt9e8KzB4wDcuZcqmw4vr9CfaP0lktpSyP60ze2N4FD8QhB8zBaCzfmL4AhUC11lXd5hc6vSE")       # X-Secret из ЛК Platega
+PLATEGA_MERCHANT_ID = os.getenv("PLATEGA_MERCHANT_ID", "")  # Merchant ID из ЛК Platega
+PLATEGA_SECRET      = os.getenv("PLATEGA_SECRET", "")       # X-Secret из ЛК Platega
 PLATEGA_API_URL     = "https://api.platega.io/v1/payment"
+
+# ── Webhook security ──────────────────────────────────────────────
+# Генерируй ОДИН РАЗ: python -c "import secrets; print(secrets.token_hex(32))"
+# Сохрани в Railway Variables как WEBHOOK_SECRET
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
 
 SQ_BASE      = "https://api.onlysq.ru/ai/openai"
@@ -544,7 +549,12 @@ class PollinationsKeyPool:
 
 
 # Все ключи Pollinations в одном пуле
+# Добавь в Railway Variables: POLLINATIONS_KEYS=key1,key2,key3,...
 _POLLINATIONS_KEYS_LIST = [
+    k.strip()
+    for k in os.getenv("POLLINATIONS_KEYS", "").split(",")
+    if k.strip()
+] or [
     "sk_MQCQ4UIUDCQUP3LrBrtr0lgBRuNnGzOe",
     "sk_VI314170xbswZWVRzpMJgMA1bDDrVgu8",
     "sk_5Zgm5bvCLyHnmvbmz6ThGfPkeAEWN34e",
@@ -1435,7 +1445,11 @@ SUB_PLANS = {
     },
 }
 
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://postgres:hwAiYmlQADTwBAUgneAoNHbHqFlmJGhe@mainline.proxy.rlwy.net:40282/railway")
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "❌ DATABASE_URL не задан! Добавь переменную окружения в Railway → Variables."
+    )
 try:
     import asyncpg
     HAS_PG = True
@@ -2130,6 +2144,65 @@ class AntiSpamMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+
+# ══════════════════════════════════════════════════════════════════════
+# 🛡 УЛУЧШЕННЫЙ АНТИФЛУД — cooldown для callback + скользящее окно
+# ══════════════════════════════════════════════════════════════════════
+class AntispamMiddleware(BaseMiddleware):
+    """
+    Защищает бота от флуда и быстрых повторных нажатий.
+    - Для callback_query: игнорирует повторные нажатия той же кнопки в течение cooldown_cb сек.
+    - Для message: лимит N сообщений в window_sec секунд на пользователя
+    """
+    def __init__(
+        self,
+        cooldown_cb: float = 1.5,
+        msg_limit: int = 8,
+        window_sec: float = 10.0,
+    ):
+        self._cooldown_cb = cooldown_cb
+        self._msg_limit = msg_limit
+        self._window_sec = window_sec
+        self._cb_last: dict = {}
+        self._msg_times: dict = {}
+
+    def _is_cb_flood(self, uid: int, cb_data: str) -> bool:
+        now = _time.monotonic()
+        user_cbs = self._cb_last.setdefault(uid, {})
+        last = user_cbs.get(cb_data, 0.0)
+        if now - last < self._cooldown_cb:
+            return True
+        user_cbs[cb_data] = now
+        return False
+
+    def _is_msg_flood(self, uid: int) -> bool:
+        now = _time.monotonic()
+        dq = self._msg_times.setdefault(uid, deque())
+        while dq and now - dq[0] > self._window_sec:
+            dq.popleft()
+        if len(dq) >= self._msg_limit:
+            return True
+        dq.append(now)
+        return False
+
+    async def __call__(
+        self,
+        handler,
+        event,
+        data,
+    ):
+        uid = None
+        if isinstance(event, CallbackQuery):
+            uid = event.from_user.id
+            if uid and self._is_cb_flood(uid, event.data or ""):
+                await event.answer()
+                return
+        elif isinstance(event, Message):
+            uid = event.from_user.id if event.from_user else None
+            if uid and uid not in ADMIN_IDS and self._is_msg_flood(uid):
+                return
+        return await handler(event, data)
+
 # ══════════════════════════════════════════════════════════════════════
 # 📦 PYDANTIC VALIDATION SCHEMAS
 # ══════════════════════════════════════════════════════════════════════
@@ -2318,6 +2391,9 @@ _limit_notify_cd: dict = {}
 dp.message.middleware(AntiSpamMiddleware())
 dp.message.middleware(TermsMiddleware())
 dp.callback_query.middleware(TermsMiddleware())
+# Улучшенный антифлуд с поддержкой callback cooldown
+_antispam = AntispamMiddleware(cooldown_cb=1.5, msg_limit=8, window_sec=10)
+dp.callback_query.middleware(_antispam)
 
 def safe_task(coro):
     """Обёртка для asyncio.create_task с логированием ошибок."""
@@ -5053,6 +5129,89 @@ async def cmd_menu(message: Message):
 async def cmd_profile(message: Message):
     await _show_profile(message, message.from_user.id)
 
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    """Красивая карточка статистики пользователя."""
+    uid = message.from_user.id
+    lims  = user_limits.get(uid, {})
+    hist  = user_history.get(uid, [])
+
+    total_requests = lims.get("total_requests", 0)
+    pro_used   = lims.get("pro_used", 0)
+    img_used   = lims.get("img_used", 0)
+    music_used = lims.get("music_used", 0)
+    video_used = lims.get("video_used", 0)
+
+    level_name, level_next = get_user_level(total_requests)
+    level_progress = ""
+    if level_next:
+        pct = int(min(total_requests / level_next * 100, 100))
+        filled = pct // 10
+        bar = "█" * filled + "░" * (10 - filled)
+        level_progress = f"\n<code>[{bar}]</code> {pct}% до следующего уровня"
+
+    fav_model = "—"
+    model_counts: dict = {}
+    for h in hist:
+        mk = h.get("model", "")
+        if mk:
+            model_counts[mk] = model_counts.get(mk, 0) + 1
+    if model_counts:
+        best_mk = max(model_counts, key=lambda k: model_counts[k])
+        fav_model = MODELS.get(best_mk, {}).get("label", best_mk)
+
+    if has_active_sub(uid):
+        sub_text = (
+            f'<tg-emoji emoji-id="{PE["check"]}"> </tg-emoji> '
+            f"Активна до {sub_expires_str(uid)}"
+        )
+    else:
+        sub_text = (
+            f'<tg-emoji emoji-id="{PE["lock_closed"]}"> </tg-emoji> '
+            f"Нет подписки"
+        )
+
+    profile = user_profiles.get(uid, {})
+    reg_date = profile.get("reg_date", "—")
+
+    text = (
+        f'<tg-emoji emoji-id="{PE["stats"]}"> </tg-emoji> '
+        f"<b>Статистика</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f'<tg-emoji emoji-id="{PE["profile"]}"> </tg-emoji> '
+        f"<b>Уровень:</b> {level_name}"
+        f"{level_progress}\n\n"
+        f'<tg-emoji emoji-id="{PE["chart_up"]}"> </tg-emoji> '
+        f"<b>Всего запросов:</b> {total_requests}\n"
+        f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> '
+        f"<b>Сегодня (чат):</b> {pro_used}\n"
+        f'<tg-emoji emoji-id="{PE["media"]}"> </tg-emoji> '
+        f"<b>Генераций фото:</b> {img_used}\n"
+        f'<tg-emoji emoji-id="{PE["bot"]}"> </tg-emoji> '
+        f"<b>Любимая модель:</b> {fav_model}\n\n"
+        f"<b>Подписка:</b> {sub_text}\n"
+        f'<tg-emoji emoji-id="{PE["calendar"]}"> </tg-emoji> '
+        f"<b>Дата регистрации:</b> {reg_date}\n"
+    )
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="Профиль",
+                callback_data="show_profile",
+                icon_custom_emoji_id=PE["profile"],
+            ),
+            InlineKeyboardButton(
+                text="Главная",
+                callback_data="back_home",
+                icon_custom_emoji_id=PE["home"],
+            ),
+        ]]),
+    )
+
+
 @dp.message(Command("ai"))
 async def cmd_ai(message: Message):
     await message.answer(
@@ -5307,6 +5466,64 @@ async def cmd_clear(message: Message):
 @dp.message(Command("about"))
 async def cmd_about(message: Message):
     await rb_about(message)
+
+
+@dp.message(Command("export"))
+async def cmd_export_history(message: Message):
+    """Экспортирует историю диалогов пользователя в текстовый файл."""
+    uid  = message.from_user.id
+    hist = user_history.get(uid, [])
+
+    if not hist:
+        await message.answer(
+            f'<tg-emoji emoji-id="{PE["info"]}"> </tg-emoji> '
+            f"<b>История пуста.</b>\n\n"
+            f"Задай хотя бы один вопрос — и история появится здесь.",
+            parse_mode="HTML",
+        )
+        return
+
+    lines = [
+        f"История диалогов — ХУЗА AI",
+        f"Пользователь: {message.from_user.full_name} (@{message.from_user.username or 'no_username'})",
+        f"Дата экспорта: {msk_now().strftime('%d.%m.%Y %H:%M')} МСК",
+        f"Всего диалогов: {len(hist)}",
+        "=" * 50,
+        "",
+    ]
+    for i, entry in enumerate(hist, 1):
+        ts          = entry.get("ts", "")
+        model       = entry.get("model", "—")
+        q           = entry.get("q", "—")
+        a           = entry.get("a", "—")
+        model_label = MODELS.get(model, {}).get("label", model)
+        lines.append(f"[{i}] {ts}")
+        lines.append(f"Модель: {model_label}")
+        lines.append(f"Вопрос: {q}")
+        lines.append(f"Ответ: {a}")
+        lines.append("-" * 40)
+        lines.append("")
+
+    content    = "\n".join(lines)
+    filename   = f"huza_history_{uid}_{msk_now().strftime('%Y%m%d_%H%M')}.txt"
+    file_bytes = content.encode("utf-8")
+
+    status = await message.answer(
+        f'<tg-emoji emoji-id="{PE["loading"]}"> </tg-emoji> '
+        f"<b>Готовлю файл...</b>",
+        parse_mode="HTML",
+    )
+    await message.answer_document(
+        BufferedInputFile(file_bytes, filename=filename),
+        caption=(
+            f'<tg-emoji emoji-id="{PE["file"]}"> </tg-emoji> '
+            f"<b>История диалогов</b>\n\n"
+            f"Всего записей: <b>{len(hist)}</b>\n"
+            f"Файл: <code>{filename}</code>"
+        ),
+        parse_mode="HTML",
+    )
+    await status.delete()
 
 
 @dp.message(F.text == "💬 Задать вопрос")
@@ -20264,7 +20481,12 @@ async def admin_stats_handler(request: aiohttp_web.Request) -> aiohttp_web.Respo
         )
 
 async def tg_webhook_handler(request: aiohttp_web.Request) -> aiohttp_web.Response:
-    """POST /tg_webhook — принимает обновления от Telegram (Задача 5)."""
+    """POST /tg_webhook — принимает обновления от Telegram с проверкой секрет-токена."""
+    if WEBHOOK_SECRET:
+        incoming_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not _hmac_mod.compare_digest(incoming_secret, WEBHOOK_SECRET):
+            logging.warning(f"[webhook] Неверный secret token от {request.remote}")
+            return aiohttp_web.Response(status=403, text="Forbidden")
     try:
         data = await request.json()
         from aiogram.types import Update
@@ -20315,6 +20537,30 @@ async def start_api_server():
     site = aiohttp_web.TCPSite(api_runner, "0.0.0.0", API_PORT)
     await site.start()
     logging.info(f"✅ API сервер запущен на порту {API_PORT}")
+
+
+
+# ── Очистка IP rate limiter от устаревших записей ────────────────────────────
+async def _cleanup_ip_windows():
+    """
+    Периодически очищает _ip_windows от IP-адресов, которые
+    не делали запросов больше 10 минут. Предотвращает утечку памяти.
+    """
+    while True:
+        await asyncio.sleep(300)  # каждые 5 минут
+        try:
+            now = _time_global.time()
+            cutoff = now - 600  # 10 минут неактивности
+            to_del = [
+                ip for ip, dq in list(_ip_windows.items())
+                if not dq or dq[-1] < cutoff
+            ]
+            for ip in to_del:
+                del _ip_windows[ip]
+            if to_del:
+                logging.debug(f"[ip-cleanup] Удалено {len(to_del)} старых IP из rate limiter")
+        except Exception as e:
+            logging.warning(f"[ip-cleanup] Ошибка: {e}")
 
 
 # ── Фоновый сброс лимитов каждые 30 минут ────────────────────────────────────
@@ -21027,50 +21273,420 @@ async def photo_packet_custom_prompt_cb(callback: CallbackQuery):
         )
 
 
-@dp.callback_query(F.data.startswith("photo_packet_custom_"))
-async def photo_packet_custom_prompt_cb(callback: CallbackQuery):
-    """
-    Нажата кнопка «✍️ Своё пожелание».
-    Ставим флаг ожидания текста и редактируем сообщение.
-    """
-    buffer_id = callback.data.split("photo_packet_custom_")[1]
-    uid = callback.from_user.id
+# =============================================================================
+# ПАТЧ 4: ГОЛОСОВОЙ ВВОД ЧЕРЕЗ GROQ WHISPER
+# =============================================================================
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")  # добавь в Railway Variables
+GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_STT_MODEL = "whisper-large-v3-turbo"
 
-    if uid not in photo_batches or buffer_id not in photo_batches[uid]:
-        await callback.answer("❌ Пакет не найден", show_alert=True)
+async def transcribe_voice_groq(ogg_bytes: bytes, filename: str = "voice.ogg") -> str:
+    """
+    Отправляет голосовой файл (OGG/MP3/WAV) в Groq Whisper и возвращает транскрипцию.
+    Модель: whisper-large-v3-turbo (самая быстрая, поддерживает русский).
+    """
+    if not GROQ_API_KEY:
+        raise RuntimeError(
+            "GROQ_API_KEY не задан. Добавь переменную в Railway → Variables."
+        )
+    form = aiohttp.FormData()
+    form.add_field(
+        "file",
+        ogg_bytes,
+        filename=filename,
+        content_type="audio/ogg",
+    )
+    form.add_field("model", GROQ_STT_MODEL)
+    form.add_field("language", "ru")
+    form.add_field("response_format", "json")
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=30)
+    ) as session:
+        async with session.post(GROQ_STT_URL, data=form, headers=headers) as resp:
+            if resp.status != 200:
+                err = await resp.text()
+                raise RuntimeError(f"Groq STT HTTP {resp.status}: {err[:200]}")
+            data = await resp.json()
+            text = data.get("text", "").strip()
+            if not text:
+                raise RuntimeError("Groq вернул пустую транскрипцию")
+            return text
+
+
+@dp.message(F.voice)
+async def handle_voice_message(message: Message):
+    """
+    Обработчик голосовых сообщений:
+    1. Скачивает OGG-файл
+    2. Транскрибирует через Groq Whisper
+    3. Прогоняет через выбранную модель ИИ и отвечает
+    """
+    uid = message.from_user.id
+
+    if not GROQ_API_KEY:
+        await message.answer(
+            f'<tg-emoji emoji-id="{PE["info"]}">ℹ</tg-emoji> '
+            f"<b>Голосовой ввод временно недоступен.</b>\n"
+            f"Ключ Groq не настроен на сервере.",
+            parse_mode="HTML",
+        )
         return
 
-    photo_custom_prompt_pending[uid] = buffer_id
-    await callback.answer()
+    # Проверяем лимиты
+    if not check_limit(uid, "pro_used"):
+        await message.answer(
+            f'<tg-emoji emoji-id="{PE["cross"]}">✗</tg-emoji> '
+            f"<b>Лимит запросов исчерпан.</b>\n\n"
+            f"Обнови подписку или подожди сброса лимита.",
+            parse_mode="HTML",
+        )
+        return
 
-    packet = photo_batches.get(uid, {}).get(buffer_id, {})
-    photo_count = len(packet.get("photos", []))
-
+    status_msg = await message.answer(
+        f'<tg-emoji emoji-id="{PE["loading"]}">↻</tg-emoji> '
+        f"<b>Распознаю речь...</b>",
+        parse_mode="HTML",
+    )
     try:
-        await callback.message.edit_text(
-            f"📸 <b>{photo_count} фото готово к анализу</b>\n\n"
-            f"✍️ <b>Напиши свой запрос</b> — что именно нужно сделать с фото?\n\n"
-            f"<i>Например: переведи текст, найди ошибки, опиши стиль, сравни качество...</i>",
+        voice = message.voice
+        tg_file = await bot.get_file(voice.file_id)
+        ogg_bytes_io = io.BytesIO()
+        await bot.download_file(tg_file.file_path, destination=ogg_bytes_io)
+        ogg_bytes = ogg_bytes_io.getvalue()
+
+        transcribed_text = await transcribe_voice_groq(ogg_bytes)
+
+        await status_msg.edit_text(
+            f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> '
+            f"<b>Распознано:</b>\n"
+            f"<i>{transcribed_text[:300]}</i>\n\n"
+            f'<tg-emoji emoji-id="{PE["loading"]}">↻</tg-emoji> '
+            f"<b>Думаю...</b>",
+            parse_mode="HTML",
+        )
+
+        model_key = resolve_model_key(uid, text=transcribed_text)
+        model_info = MODELS.get(model_key, {})
+        model_label = model_info.get("label", model_key)
+
+        history = list(user_history.get(uid, []))
+        messages_for_ai = [{"role": h["role"] if "role" in h else "user", "content": h.get("q", h.get("content", ""))} for h in history[-10:]]
+        messages_for_ai.append({"role": "user", "content": transcribed_text})
+
+        ai_answer = await call_chat(messages_for_ai, model_key, max_tokens=1500)
+
+        if uid not in user_history:
+            user_history[uid] = []
+        user_history[uid].append({"q": transcribed_text, "a": ai_answer, "model": model_key, "ts": msk_now().strftime("%d.%m.%Y %H:%M")})
+        user_history[uid] = user_history[uid][-10:]
+        spend_limit(uid, model_key)
+
+        response_text = (
+            f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> '
+            f"<b>Вы сказали:</b> <i>{transcribed_text[:200]}</i>\n"
+            f"<b>Модель:</b> {model_label}\n\n"
+            f"{ai_answer}"
+        )
+        await status_msg.edit_text(
+            premium_html(response_text[:4000]),
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 InlineKeyboardButton(
-                    text="❌ Отмена",
-                    callback_data=f"photo_packet_cancel_{buffer_id}"
-                )
-            ]])
+                    text="↩ Ещё вопрос",
+                    callback_data="back_home",
+                    icon_custom_emoji_id=PE["loading"],
+                ),
+            ]]),
+        )
+    except RuntimeError as e:
+        err_text = str(e)
+        logging.warning(f"[voice] uid={uid} ошибка: {err_text}")
+        await status_msg.edit_text(
+            f'<tg-emoji emoji-id="{PE["cross"]}">✗</tg-emoji> '
+            f"<b>Не удалось распознать голос</b>\n\n"
+            f"<i>{err_text[:300]}</i>",
+            parse_mode="HTML",
         )
     except Exception as e:
-        logging.warning(f"photo_packet_custom_prompt_cb edit: {e}")
-        await callback.message.answer(
-            "✍️ Напиши свой запрос к фото:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="❌ Отмена",
-                    callback_data=f"photo_packet_cancel_{buffer_id}"
-                )
-            ]])
+        logging.exception(f"[voice] uid={uid} неожиданная ошибка: {e}")
+        try:
+            await status_msg.edit_text(
+                f'<tg-emoji emoji-id="{PE["cross"]}">✗</tg-emoji> '
+                f"<b>Ошибка обработки голоса</b>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+
+# =============================================================================
+# ПАТЧ 5: КОМАНДА /stats — статистика пользователя
+# =============================================================================
+# =============================================================================
+# ПАТЧ 6: КОМАНДА /export — экспорт истории чата в TXT
+# =============================================================================
+
+# ══════════════════════════════════════════════════════════════════════
+# 🎙 ГОЛОСОВОЙ ВВОД ЧЕРЕЗ GROQ WHISPER (ПАТЧ 4)
+# ══════════════════════════════════════════════════════════════════════
+GROQ_API_KEY  = os.getenv("GROQ_API_KEY", "")  # добавь в Railway Variables
+GROQ_STT_URL  = "https://api.groq.com/openai/v1/audio/transcriptions"
+GROQ_STT_MODEL = "whisper-large-v3-turbo"
+
+async def transcribe_voice_groq(ogg_bytes: bytes, filename: str = "voice.ogg") -> str:
+    """Отправляет голосовой файл в Groq Whisper и возвращает транскрипцию."""
+    if not GROQ_API_KEY:
+        raise RuntimeError(
+            "GROQ_API_KEY не задан. Добавь переменную в Railway → Variables."
+        )
+    form = aiohttp.FormData()
+    form.add_field("file", ogg_bytes, filename=filename, content_type="audio/ogg")
+    form.add_field("model", GROQ_STT_MODEL)
+    form.add_field("language", "ru")
+    form.add_field("response_format", "json")
+    headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        async with session.post(GROQ_STT_URL, data=form, headers=headers) as resp:
+            if resp.status != 200:
+                err = await resp.text()
+                raise RuntimeError(f"Groq STT HTTP {resp.status}: {err[:200]}")
+            data = await resp.json()
+            text = data.get("text", "").strip()
+            if not text:
+                raise RuntimeError("Groq вернул пустую транскрипцию")
+            return text
+
+
+@dp.message(F.voice)
+async def handle_voice_message(message: Message):
+    """
+    Обработчик голосовых сообщений:
+    1. Скачивает OGG-файл
+    2. Транскрибирует через Groq Whisper
+    3. Прогоняет через выбранную модель ИИ
+    """
+    uid = message.from_user.id
+
+    if not check_limit(uid, "pro_used"):
+        await message.answer(
+            f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> '
+            f'<b>Лимит запросов исчерпан.</b>\n\nОбнови подписку или подожди сброса лимита.',
+            parse_mode="HTML",
+        )
+        return
+
+    if not GROQ_API_KEY:
+        await message.answer(
+            f'<tg-emoji emoji-id="{PE["info"]}">ℹ</tg-emoji> '
+            f'<b>Голосовой ввод временно недоступен.</b>\nКлюч Groq не настроен на сервере.',
+            parse_mode="HTML",
+        )
+        return
+
+    status_msg = await message.answer(
+        f'<tg-emoji emoji-id="{PE["loading"]}">🔄</tg-emoji> <b>Распознаю речь...</b>',
+        parse_mode="HTML",
+    )
+    try:
+        voice = message.voice
+        tg_file = await bot.get_file(voice.file_id)
+        ogg_bytes_io = io.BytesIO()
+        await bot.download_file(tg_file.file_path, destination=ogg_bytes_io)
+        ogg_bytes = ogg_bytes_io.getvalue()
+
+        transcribed_text = await transcribe_voice_groq(ogg_bytes)
+
+        await status_msg.edit_text(
+            f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> <b>Распознано:</b>\n'
+            f'<i>{transcribed_text[:300]}</i>\n\n'
+            f'<tg-emoji emoji-id="{PE["loading"]}">🔄</tg-emoji> <b>Думаю...</b>',
+            parse_mode="HTML",
         )
 
+        model_key = resolve_model_key(uid, text=transcribed_text)
+        model_info = MODELS.get(model_key, {})
+        model_label = model_info.get("label", model_key)
+
+        history = list(user_history.get(uid, []))
+        messages_for_ai = [{"role": h["role"], "content": h["content"]} for h in history if "role" in h]
+        messages_for_ai.append({"role": "user", "content": transcribed_text})
+
+        ai_answer = await call_chat(messages_for_ai, model_key, max_tokens=1500)
+
+        if uid not in user_history:
+            user_history[uid] = []
+        user_history[uid].append({"role": "user", "content": transcribed_text})
+        user_history[uid].append({"role": "assistant", "content": ai_answer})
+        user_history[uid] = user_history[uid][-20:]
+
+        spend_limit(uid, model_key)
+
+        response_text = (
+            f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> '
+            f'<b>Вы сказали:</b> <i>{transcribed_text[:200]}</i>\n'
+            f'<b>Модель:</b> {model_label}\n\n'
+            f'{ai_answer}'
+        )
+        await status_msg.edit_text(
+            premium_html(response_text[:4000]),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                AiogramInlineKeyboardButton(
+                    text="◁ Главная",
+                    callback_data="back_home",
+                    icon_custom_emoji_id="5345906554510012647",
+                ),
+            ]]),
+        )
+    except RuntimeError as e:
+        err_text = str(e)
+        logging.warning(f"[voice] uid={uid} ошибка: {err_text}")
+        try:
+            await status_msg.edit_text(
+                f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> '
+                f'<b>Не удалось распознать голос</b>\n\n<i>{err_text[:300]}</i>',
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        logging.exception(f"[voice] uid={uid} неожиданная ошибка: {e}")
+        try:
+            await status_msg.edit_text(
+                f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> <b>Ошибка обработки голоса</b>',
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 📊 КОМАНДА /stats — статистика пользователя (ПАТЧ 5)
+# ══════════════════════════════════════════════════════════════════════
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    """Красивая карточка статистики пользователя."""
+    uid = message.from_user.id
+    lims = user_limits.get(uid, {})
+    hist = user_history.get(uid, [])
+
+    total_requests = lims.get("total_requests", 0)
+    pro_used       = lims.get("pro_used", 0)
+    img_used       = lims.get("img_used", 0)
+    music_used     = lims.get("music_used", 0)
+
+    level_name, level_next = get_user_level(total_requests)
+    level_progress = ""
+    if level_next:
+        pct = int(min(total_requests / level_next * 100, 100))
+        filled = pct // 10
+        bar = "█" * filled + "░" * (10 - filled)
+        level_progress = f"\n<code>[{bar}]</code> {pct}% до следующего уровня"
+
+    fav_model = "—"
+    model_counts: dict = {}
+    for h in hist:
+        mk = h.get("model", "")
+        if mk:
+            model_counts[mk] = model_counts.get(mk, 0) + 1
+    if model_counts:
+        best_mk = max(model_counts, key=lambda k: model_counts[k])
+        fav_model = MODELS.get(best_mk, {}).get("label", best_mk)
+
+    if has_active_sub(uid):
+        sub_text = (
+            f'<tg-emoji emoji-id="{PE["check"]}">✅</tg-emoji> Активна до '
+            + sub_expires_str(uid)
+        )
+    else:
+        sub_text = f'<tg-emoji emoji-id="{PE["lock_closed"]}">🔒</tg-emoji> Нет подписки'
+
+    profile = user_profiles.get(uid, {})
+    reg_date = profile.get("reg_date", "—")
+
+    text = (
+        f'<tg-emoji emoji-id="{PE["stats"]}">📊</tg-emoji> <b>Статистика</b>\n'
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f'<tg-emoji emoji-id="{PE["profile"]}">👤</tg-emoji> <b>Уровень:</b> {level_name}'
+        f'{level_progress}\n\n'
+        f'<tg-emoji emoji-id="{PE["chart_up"]}">📈</tg-emoji> <b>Всего запросов:</b> {total_requests}\n'
+        f'<tg-emoji emoji-id="{PE["write"]}">✍</tg-emoji> <b>Сегодня (чат):</b> {pro_used}\n'
+        f'<tg-emoji emoji-id="{PE["media"]}">🖼</tg-emoji> <b>Генераций фото:</b> {img_used}\n'
+        f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>Любимая модель:</b> {fav_model}\n\n'
+        f'<tg-emoji emoji-id="{PE["gift"]}">🎁</tg-emoji> <b>Подписка:</b> {sub_text}\n'
+        f'<tg-emoji emoji-id="{PE["calendar"]}">📅</tg-emoji> <b>Дата регистрации:</b> {reg_date}\n'
+    )
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            AiogramInlineKeyboardButton(
+                text="Профиль",
+                callback_data="show_profile",
+                icon_custom_emoji_id=PE["profile"],
+            ),
+            AiogramInlineKeyboardButton(
+                text="Главная",
+                callback_data="back_home",
+                icon_custom_emoji_id=PE["home"],
+            ),
+        ]]),
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 📁 КОМАНДА /export — экспорт истории чата (ПАТЧ 6)
+# ══════════════════════════════════════════════════════════════════════
+@dp.message(Command("export"))
+async def cmd_export_history(message: Message):
+    """Экспортирует историю диалогов пользователя в текстовый файл."""
+    uid = message.from_user.id
+    hist = user_history.get(uid, [])
+
+    if not hist:
+        await message.answer(
+            f'<tg-emoji emoji-id="{PE["info"]}">ℹ</tg-emoji> '
+            f'<b>История пуста.</b>\n\nЗадай хотя бы один вопрос — и история появится здесь.',
+            parse_mode="HTML",
+        )
+        return
+
+    lines_out = [
+        "История диалогов — ХУЗА AI",
+        f"Пользователь: {message.from_user.full_name} (@{message.from_user.username or 'no_username'})",
+        f"Всего диалогов: {len(hist)}",
+        "=" * 50,
+        "",
+    ]
+    for i, entry in enumerate(hist, 1):
+        role = entry.get("role", "—")
+        content = entry.get("content", entry.get("q", entry.get("a", "—")))
+        model = entry.get("model", "")
+        model_label = MODELS.get(model, {}).get("label", model) if model else ""
+        lines_out.append(f"[{i}] role={role}" + (f" | {model_label}" if model_label else ""))
+        lines_out.append(str(content))
+        lines_out.append("-" * 40)
+        lines_out.append("")
+
+    file_content = "\n".join(lines_out)
+    filename = f"huza_history_{uid}.txt"
+    file_bytes = file_content.encode("utf-8")
+
+    status = await message.answer(
+        f'<tg-emoji emoji-id="{PE["loading"]}">🔄</tg-emoji> <b>Готовлю файл...</b>',
+        parse_mode="HTML",
+    )
+    await message.answer_document(
+        BufferedInputFile(file_bytes, filename=filename),
+        caption=(
+            f'<tg-emoji emoji-id="{PE["file"]}">📁</tg-emoji> <b>История диалогов</b>\n\n'
+            f'Всего записей: <b>{len(hist)}</b>\n'
+            f'Файл: <code>{filename}</code>'
+        ),
+        parse_mode="HTML",
+    )
+    await status.delete()
 
 async def main():
     global bot, redis_client, api_runner
@@ -21141,6 +21757,8 @@ async def main():
             BotCommand(command="info",    description="💡 Помощь и контакты"),
             BotCommand(command="ref",     description="🔗 Реферальная программа"),
             BotCommand(command="tts",     description="🔊 Включить/выключить голосовые ответы"),
+            BotCommand(command="stats",   description="📊 Моя статистика"),
+            BotCommand(command="export",  description="📁 Экспорт истории"),
         ], scope=BotCommandScopeDefault())
         # Устанавливаем кнопку "🤖 ХУЗА AI" слева в поле ввода (MenuButtonWebApp)
         try:
@@ -21157,13 +21775,19 @@ async def main():
         track_background_task(asyncio.create_task(_background_refresh_limits()))
         track_background_task(asyncio.create_task(check_expiring_subs()))
         track_background_task(asyncio.create_task(_img_gen_worker()))
+        track_background_task(asyncio.create_task(_cleanup_ip_windows()))
+        track_background_task(asyncio.create_task(_cleanup_ip_windows()))
         # ── Запуск: Webhook или long polling (Задача 5) ──────────────────
         await start_api_server()
         WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
         if WEBHOOK_URL:
             webhook_path = "/tg_webhook"
             full_webhook = WEBHOOK_URL.rstrip("/") + webhook_path
-            await bot.set_webhook(full_webhook, drop_pending_updates=True)
+            await bot.set_webhook(
+                full_webhook,
+                drop_pending_updates=True,
+                secret_token=WEBHOOK_SECRET or None,
+            )
             logging.info(f"✅ Webhook установлен: {full_webhook}")
             while True:
                 await asyncio.sleep(3600)
