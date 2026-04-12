@@ -1217,8 +1217,30 @@ PHOTO_BATCH_MAX_PHOTOS = int(os.getenv("PHOTO_BATCH_MAX_PHOTOS", "8"))
 user_referrals    = {}
 REF_BONUS_INVITER = 5
 REF_BONUS_NEW     = 10
+REF_BONUS_PAYMENT_PCT = 20  # % с оплаты реферала (партнёрка уровня 2)
+user_ref_earnings: dict = {}  # uid -> суммарный заработок с рефералов (₽)
+
 user_history      = {}  # {uid: [{"q","a","model","ts"}]} — последние 10
 user_favorites: dict = {}  # uid -> [{"name": str, "text": str}]
+
+# ── Пробный период (3 дня при регистрации) ─────────────────
+TRIAL_DAYS = 3
+_trial_given: set = set()  # uid которым уже выдан trial
+
+# ── Стрик активности ──────────────────────────────────────
+user_streak: dict = {}  # uid -> {"days": int, "last_date": date}
+STREAK_BONUS_DAYS = {7: 5, 14: 10, 30: 20}  # день → бонусные запросы
+
+# ── Ежедневный бонус ──────────────────────────────────────
+DAILY_BONUS_REQUESTS = 2  # запросов за ежедневный бонус
+
+# ── Токен-экономика (пакеты запросов) ─────────────────────
+TOKEN_PACKS = {
+    "pack_50":  {"requests": 50,  "price": 49,  "label": "⚡ 50 запросов — 49 ₽"},
+    "pack_200": {"requests": 200, "price": 149, "label": "💎 200 запросов — 149 ₽"},
+    "pack_500": {"requests": 500, "price": 299, "label": "🔥 500 запросов — 299 ₽"},
+}
+user_extra_requests: dict = {}  # uid -> доп. запросы из пакетов
 
 # ── Режимы ответа ─────────────────────────────────────────
 ANSWER_MODES = {
@@ -1847,6 +1869,12 @@ async def init_db():
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS total_docs INT DEFAULT 0",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_model TEXT DEFAULT ''",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS tts_enabled BOOLEAN DEFAULT FALSE",  # ПАТЧ 10
+                # Новые фичи v2
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS trial_given BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS streak_days INT DEFAULT 0",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS streak_last DATE DEFAULT NULL",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS extra_requests INT DEFAULT 0",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS ref_earnings INT DEFAULT 0",
                 # Удаляем старые веб-колонки если есть (мягко)
                 "ALTER TABLE users DROP COLUMN IF EXISTS web_used",
                 "ALTER TABLE users DROP COLUMN IF EXISTS web_reset",
@@ -2198,6 +2226,21 @@ async def db_load_all_users():
                     _terms_accepted.add(uid)
             except Exception:
                 pass
+            # Загружаем новые поля v2
+            try:
+                keys = row.keys() if hasattr(row, "keys") else []
+                if "trial_given" in keys and row["trial_given"]:
+                    _trial_given.add(uid)
+                if "streak_days" in keys and row["streak_days"] is not None:
+                    sd = row["streak_days"]
+                    sl = row.get("streak_last") if "streak_last" in keys else None
+                    user_streak[uid] = {"days": int(sd), "last_date": sl}
+                if "extra_requests" in keys and row["extra_requests"] is not None:
+                    user_extra_requests[uid] = int(row["extra_requests"])
+                if "ref_earnings" in keys and row["ref_earnings"] is not None:
+                    user_ref_earnings[uid] = int(row["ref_earnings"])
+            except Exception:
+                pass
         logging.info(f"✅ Загружено {len(rows)} пользователей из БД")
     except Exception as e:
         logging.error(f"db_load_all_users: {e}")
@@ -2499,6 +2542,12 @@ class FavStates(StatesGroup):
 class PhotoPackStates(StatesGroup):
     waiting_mode = State()  # Ожидание выбора режима обработки пакета фото
 
+# ── FSM-состояния для онбординга новых пользователей ──
+class OnboardStates(StatesGroup):
+    step1 = State()
+    step2 = State()
+    step3 = State()
+
 bot = Bot(token=TELEGRAM_TOKEN)
 dp  = Dispatcher()
 api_runner: aiohttp_web.AppRunner | None = None
@@ -2706,7 +2755,9 @@ def can_send(uid: int, model_key: str):
     # "auto" никогда не является премиум-моделью само по себе
     if model_key != "auto" and model_key in PREMIUM_MODELS and not has_active_sub(uid):
         return False, "premium"
-    if lim["pro_used"] >= L["pro_day"]:
+    # Учитываем дополнительные запросы из пакетов
+    extra = user_extra_requests.get(uid, 0)
+    if lim["pro_used"] >= L["pro_day"] and extra <= 0:
         return False, "pro"
     return True, ""
 
@@ -2737,8 +2788,15 @@ async def _db_save_limits(uid: int):
 
 def spend_limit(uid: int, model_key: str):
     _refresh_limits(uid)
-    user_limits[uid]["pro_used"] += 1
-    asyncio.ensure_future(_db_save_limits(uid))
+    L   = _get_lims(uid)
+    lim = user_limits[uid]
+    # Если основной лимит исчерпан — тратим из пакета
+    if lim["pro_used"] >= L["pro_day"] and user_extra_requests.get(uid, 0) > 0:
+        user_extra_requests[uid] = max(0, user_extra_requests.get(uid, 0) - 1)
+        asyncio.ensure_future(_db_save_extra_requests(uid))
+    else:
+        lim["pro_used"] += 1
+        asyncio.ensure_future(_db_save_limits(uid))
     asyncio.ensure_future(_db_log_model_usage(uid, model_key))  # Задача 11
 
 
@@ -4839,26 +4897,37 @@ def main_reply_kb(uid: int) -> ReplyKeyboardMarkup:
 
 
 def home_kb(uid: int) -> InlineKeyboardMarkup:
-    sub_text = "💎 Подписка активна" if has_active_sub(uid) else "💎 Купить подписку"
+    sub_text = "Подписка активна" if has_active_sub(uid) else "Купить подписку"
+    lb = user_profiles.get(uid, {}).get("last_bonus")
+    can_bonus = (lb is None) or (isinstance(lb, datetime.datetime) and (msk_now() - lb).total_seconds() >= 86400)
+    bonus_text = "Забрать бонус!" if can_bonus else "Бонус"
+    extra = user_extra_requests.get(uid, 0)
     built = [
         [
-            InlineKeyboardButton(text="💬 Написать",         callback_data="menu_ask"),
-            InlineKeyboardButton(text="👤 Профиль",          callback_data="menu_profile"),
+            InlineKeyboardButton(text="Написать",          callback_data="menu_ask",     icon_custom_emoji_id=PE["write"]),
+            InlineKeyboardButton(text="Профиль",           callback_data="menu_profile", icon_custom_emoji_id=PE["profile"]),
         ],
         [
-            InlineKeyboardButton(text="🎨 Картинки · Видео", callback_data="menu_extra"),
+            InlineKeyboardButton(text="Картинки · Видео",  callback_data="menu_extra",   icon_custom_emoji_id=PE["media"]),
         ],
         [
-            InlineKeyboardButton(text="🧹 Очистить память",  callback_data="clear_memory"),
-            InlineKeyboardButton(text="⭐ Избранное",         callback_data="menu_favorites"),
+            InlineKeyboardButton(text="Очистить память",   callback_data="clear_memory", icon_custom_emoji_id=PE["trash"]),
+            InlineKeyboardButton(text="Избранное",         callback_data="menu_favorites", icon_custom_emoji_id=PE["tag"]),
         ],
         [
-            InlineKeyboardButton(text="💬 Поддержка",        callback_data="menu_support"),
-            InlineKeyboardButton(text=sub_text,              callback_data="sub_menu"),
+            InlineKeyboardButton(text="Поддержка",         callback_data="menu_support", icon_custom_emoji_id=PE["megaphone"]),
+            InlineKeyboardButton(text=sub_text,            callback_data="sub_menu",     icon_custom_emoji_id=PE["wallet"]),
+        ],
+        [
+            InlineKeyboardButton(text=bonus_text,          callback_data="menu_daily_bonus", icon_custom_emoji_id=PE["gift"]),
+            InlineKeyboardButton(text=f"Запросы{' +'+str(extra) if extra else ''}", callback_data="menu_token_packs", icon_custom_emoji_id=PE["money"]),
         ],
     ]
     if uid in ADMIN_IDS:
-        built.append([InlineKeyboardButton(text="⚙️ Админ", callback_data="menu_admin")])
+        built.append([
+            InlineKeyboardButton(text="Админ",   callback_data="menu_admin",          icon_custom_emoji_id=PE["settings"]),
+            InlineKeyboardButton(text="Графики", callback_data="admin_charts_refresh", icon_custom_emoji_id=PE["chart_up"]),
+        ])
     return InlineKeyboardMarkup(inline_keyboard=built)
 
 
@@ -5139,9 +5208,10 @@ def _welcome_text(name: str, tok: int = 0, is_admin: bool = False, ref_bonus_msg
 # ==================================================================
 
 @dp.message(Command("start"))
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
     uid  = message.from_user.id
     name = message.from_user.first_name or "Пользователь"
+    is_brand_new = uid not in user_settings
 
     # Инициализация пользователя
     if uid not in user_settings:
@@ -5159,80 +5229,88 @@ async def cmd_start(message: Message):
 
     # ── Реферальная система ──
     msg_text = message.text or ""
+    ref_bonus_msg = ""
     if "ref_" in msg_text:
         try:
             ref_part = msg_text.split("ref_", 1)[1].strip().split()[0]
             inviter_uid = int(ref_part)
-            # Проверяем что пользователь ещё не был зарегистрирован по рефералу
             already_referred = any(
                 uid in data.get("refs", [])
                 for data in user_referrals.values()
             )
-            # Не начисляем самому себе и не начисляем повторно
             if inviter_uid != uid and not already_referred and inviter_uid in user_limits:
-                # Инициализируем структуру рефералов для инвайтера
                 if inviter_uid not in user_referrals:
                     user_referrals[inviter_uid] = {"refs": []}
                 user_referrals[inviter_uid]["refs"].append(uid)
-                # Бонус инвайтеру: снижаем pro_used (эффективно добавляем запросы)
                 _init_limits(inviter_uid)
                 user_limits[inviter_uid]["pro_used"] = max(
                     0, user_limits[inviter_uid]["pro_used"] - REF_BONUS_INVITER
                 )
                 asyncio.create_task(db_save_user(inviter_uid))
-                # Бонус новому пользователю
                 user_limits[uid]["pro_used"] = max(
                     0, user_limits[uid]["pro_used"] - REF_BONUS_NEW
                 )
+                ref_bonus_msg = f'🎁 Бонус за реферала: <b>+{REF_BONUS_NEW} запросов</b>'
                 logging.info(f"[REF] uid={uid} пришёл по реферу от uid={inviter_uid}")
-                # Уведомляем инвайтера
                 try:
                     await bot.send_message(
                         inviter_uid,
-                        f"🎉 <b>По вашей реферальной ссылке зарегистрировался новый пользователь!</b>\n\n"
-                        f"✅ Вам начислено <b>+{REF_BONUS_INVITER} запросов</b>\n"
-                        f"👥 Всего приглашено: <b>{len(user_referrals[inviter_uid]['refs'])}</b>",
+                        premium_html(
+                            f"🎉 <b>По вашей реферальной ссылке зарегистрировался новый пользователь!</b>\n\n"
+                            f"✅ Вам начислено <b>+{REF_BONUS_INVITER} запросов</b>\n"
+                            f"👥 Всего приглашено: <b>{len(user_referrals[inviter_uid]['refs'])}</b>"
+                        ),
                         parse_mode="HTML"
                     )
                 except Exception as _ref_e:
                     logging.warning(f"[REF] не удалось уведомить inviter={inviter_uid}: {_ref_e}")
         except (ValueError, IndexError):
-            pass  # некорректный реф-код — просто игнорируем
+            pass
 
-    # Trial для новых
-    _is_brand_new = not has_active_sub(uid)
-    # Trial disabled
+    # ── Пробный период для новых пользователей (3 дня) ──
+    trial_given = False
+    if is_brand_new and uid not in _trial_given:
+        _trial_given.add(uid)
+        now = msk_now()
+        expires = now + datetime.timedelta(days=TRIAL_DAYS)
+        user_subscriptions[uid] = {"expires": expires, "plan": "week", "is_trial": True}
+        asyncio.create_task(_db_save_trial_flag(uid))
+        asyncio.create_task(db_save_subscription(uid))
+        trial_given = True
+        logging.info(f"[TRIAL] uid={uid} получил {TRIAL_DAYS} дня trial")
 
     # Сохраняем в БД
     asyncio.create_task(db_save_user(uid, name, message.from_user.username or ""))
 
-    # Показываем клавиатуру навигации (без кнопки "Открыть Хуза ИИ")
+    # Клавиатура навигации
     try:
         await message.answer(premium_emoji("smile", "🙂"), parse_mode="HTML", reply_markup=main_reply_kb(uid))
     except Exception as e:
         logging.error(f"start kb error: {e}")
 
-    # Проверка подписки
+    # Проверка подписки на каналы
     try:
         if not await require_subscription(message):
             return
     except Exception as e:
         logging.error(f"start sub check error: {e}")
 
+    # Для новых — онбординг
+    if is_brand_new:
+        await _show_onboard(message, uid, state)
+        return
+
     # Приветственное сообщение
     try:
         tok = get_tokens(uid)
         is_admin = uid in ADMIN_IDS
-        text = _welcome_text(name, tok, is_admin)
-        # Trial disabled
+        trial_note = f"\n🎁 <b>Пробный период {TRIAL_DAYS} дня активирован!</b>" if trial_given else ""
+        text = _welcome_text(name, tok, is_admin, ref_bonus_msg + trial_note)
         await message.answer(text, parse_mode="HTML", reply_markup=home_kb(uid))
     except Exception as e:
         logging.error(f"start welcome error uid={uid}: {e}")
         try:
-            await message.answer(
-                f"Привет, {name}! Добро пожаловать в Хуза ИИ!",
-                reply_markup=home_kb(uid)
-            )
+            await message.answer(f"Привет, {name}! Добро пожаловать в Хуза ИИ!", reply_markup=home_kb(uid))
         except Exception:
             pass
 
@@ -21576,6 +21654,698 @@ async def handle_group_message(message: Message, state: FSMContext):
         logging.warning(f"handle_group_message: {e}")
         await message.reply(f"❌ Ошибка: {e}")
 
+
+
+# ══════════════════════════════════════════════════════════════
+# 🆕 НОВЫЕ ФИЧИ v2: Стрик, Бонус, Пакеты, Онбординг, История
+# ══════════════════════════════════════════════════════════════
+
+# ── DB-хелперы для новых фич ───────────────────────────────
+
+async def _db_save_extra_requests(uid: int):
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET extra_requests=$1 WHERE uid=$2",
+                user_extra_requests.get(uid, 0), uid
+            )
+    except Exception as e:
+        logging.warning(f"_db_save_extra_requests uid={uid}: {e}")
+
+
+async def _db_save_streak(uid: int):
+    if not db_pool:
+        return
+    sk = user_streak.get(uid, {})
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET streak_days=$1, streak_last=$2 WHERE uid=$3",
+                sk.get("days", 0), sk.get("last_date"), uid
+            )
+    except Exception as e:
+        logging.warning(f"_db_save_streak uid={uid}: {e}")
+
+
+async def _db_save_trial_flag(uid: int):
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET trial_given=TRUE WHERE uid=$1", uid)
+    except Exception as e:
+        logging.warning(f"_db_save_trial uid={uid}: {e}")
+
+
+async def _db_save_ref_earnings(uid: int):
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE users SET ref_earnings=$1 WHERE uid=$2",
+                user_ref_earnings.get(uid, 0), uid
+            )
+    except Exception as e:
+        logging.warning(f"_db_save_ref_earnings uid={uid}: {e}")
+
+
+# ── Стрик активности ──────────────────────────────────────
+
+async def _update_streak(uid: int):
+    """Обновляет стрик при первом запросе за день, даёт бонус на 7/14/30 день."""
+    today = msk_now().date()
+    sk = user_streak.get(uid, {"days": 0, "last_date": None})
+    last = sk.get("last_date")
+    if last == today:
+        return
+    yesterday = today - datetime.timedelta(days=1)
+    if last == yesterday:
+        sk["days"] = sk.get("days", 0) + 1
+    elif last is None or last < yesterday:
+        sk["days"] = 1
+    sk["last_date"] = today
+    user_streak[uid] = sk
+    asyncio.create_task(_db_save_streak(uid))
+    days = sk["days"]
+    bonus = STREAK_BONUS_DAYS.get(days)
+    if bonus:
+        _init_limits(uid)
+        user_limits[uid]["pro_used"] = max(0, user_limits[uid]["pro_used"] - bonus)
+        asyncio.create_task(_db_save_limits(uid))
+        try:
+            await bot.send_message(
+                uid,
+                premium_html(
+                    f"🔥 <b>Стрик {days} дней!</b>\n\n"
+                    f"Вы заходите в бот уже <b>{days} дней подряд</b>!\n"
+                    f"✅ Бонус: <b>+{bonus} запросов</b> начислено\n\n"
+                    "Продолжайте — за 30 дней ждёт большой бонус! 💪"
+                ),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Главная", callback_data="back_home", icon_custom_emoji_id=PE["home"])
+                ]])
+            )
+        except Exception:
+            pass
+
+
+class StreakMiddleware(BaseMiddleware):
+    """Обновляет стрик активности при каждом сообщении пользователя."""
+    async def __call__(self, handler, event, data):
+        if isinstance(event, Message):
+            uid = event.from_user.id if event.from_user else None
+            if uid and uid not in ADMIN_IDS:
+                asyncio.ensure_future(_update_streak(uid))
+        return await handler(event, data)
+
+dp.message.middleware(StreakMiddleware())
+
+
+# ── Ежедневный бонус ──────────────────────────────────────
+
+def _can_claim_daily_bonus(uid: int) -> bool:
+    lb = user_profiles.get(uid, {}).get("last_bonus")
+    if lb is None:
+        return True
+    if isinstance(lb, datetime.datetime):
+        return (msk_now() - lb).total_seconds() >= 86400
+    return True
+
+
+def _daily_bonus_remaining(uid: int) -> str:
+    lb = user_profiles.get(uid, {}).get("last_bonus")
+    if lb is None:
+        return "доступен сейчас!"
+    if isinstance(lb, datetime.datetime):
+        secs_left = max(0, 86400 - int((msk_now() - lb).total_seconds()))
+        h, rem = divmod(secs_left, 3600)
+        m = rem // 60
+        return f"через {h}ч {m}мин"
+    return "доступен сейчас!"
+
+
+def daily_bonus_kb(uid: int) -> InlineKeyboardMarkup:
+    can = _can_claim_daily_bonus(uid)
+    rows = []
+    if can:
+        rows.append([InlineKeyboardButton(
+            text="Забрать бонус",
+            callback_data="claim_daily_bonus",
+            icon_custom_emoji_id=PE["gift"]
+        )])
+    else:
+        rows.append([InlineKeyboardButton(
+            text=f"Бонус: {_daily_bonus_remaining(uid)}",
+            callback_data="daily_bonus_timer",
+            icon_custom_emoji_id=PE["clock"]
+        )])
+    rows.append([InlineKeyboardButton(
+        text="Главная", callback_data="back_home", icon_custom_emoji_id=PE["home"]
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data == "menu_daily_bonus")
+async def cb_daily_bonus_menu(callback: CallbackQuery):
+    uid = callback.from_user.id
+    sk = user_streak.get(uid, {"days": 0})
+    streak_days = sk.get("days", 0)
+    can = _can_claim_daily_bonus(uid)
+    text = premium_html(
+        "🎁 <b>Ежедневный бонус</b>\n\n"
+        f"🔥 Стрик: <b>{streak_days} дней</b>\n"
+        f"⚡ Бонус: <b>+{DAILY_BONUS_REQUESTS} запроса</b>\n\n"
+        "Заходи каждый день — на 7-й, 14-й и 30-й день бонусы!\n\n"
+        + ("✅ <b>Бонус готов!</b> Забери ниже." if can else
+           f"⏳ Следующий: <b>{_daily_bonus_remaining(uid)}</b>")
+    )
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=daily_bonus_kb(uid))
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=daily_bonus_kb(uid))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "claim_daily_bonus")
+async def cb_claim_daily_bonus(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if not _can_claim_daily_bonus(uid):
+        await callback.answer(f"⏳ {_daily_bonus_remaining(uid)}", show_alert=True)
+        return
+    _init_limits(uid)
+    user_limits[uid]["pro_used"] = max(0, user_limits[uid]["pro_used"] - DAILY_BONUS_REQUESTS)
+    if uid not in user_profiles:
+        user_profiles[uid] = {}
+    user_profiles[uid]["last_bonus"] = msk_now()
+    asyncio.create_task(_db_save_limits(uid))
+    asyncio.create_task(db_save_user(uid, user_profiles.get(uid, {}).get("name", "")))
+    await callback.answer(f"🎉 +{DAILY_BONUS_REQUESTS} запроса получено!", show_alert=True)
+    sk = user_streak.get(uid, {"days": 0})
+    text = premium_html(
+        "🎁 <b>Бонус получен!</b>\n\n"
+        f"✅ <b>+{DAILY_BONUS_REQUESTS} запроса</b> начислено\n"
+        f"🔥 Стрик: <b>{sk.get('days', 0)} дней</b>\n\n"
+        "Возвращайся завтра за следующим!"
+    )
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Главная", callback_data="back_home", icon_custom_emoji_id=PE["home"])
+        ]]))
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "daily_bonus_timer")
+async def cb_daily_bonus_timer(callback: CallbackQuery):
+    uid = callback.from_user.id
+    await callback.answer(f"⏳ {_daily_bonus_remaining(uid)}", show_alert=True)
+
+
+# ── Токен-пакеты ──────────────────────────────────────────
+
+def token_packs_kb() -> InlineKeyboardMarkup:
+    rows = []
+    for pk, pack in TOKEN_PACKS.items():
+        rows.append([InlineKeyboardButton(text=pack["label"], callback_data=f"buy_pack_{pk}")])
+    rows.append([InlineKeyboardButton(
+        text="Подписка (выгоднее)", callback_data="sub_menu", icon_custom_emoji_id=PE["wallet"]
+    )])
+    rows.append([InlineKeyboardButton(
+        text="Назад", callback_data="back_home", icon_custom_emoji_id=PE["home"]
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data == "menu_token_packs")
+async def cb_token_packs_menu(callback: CallbackQuery):
+    uid = callback.from_user.id
+    extra = user_extra_requests.get(uid, 0)
+    text = premium_html(
+        "💰 <b>Пакеты запросов</b>\n\n"
+        f"✅ Сейчас у вас: <b>{extra} доп. запросов</b>\n\n"
+        "Пакеты работают поверх суточного лимита.\n"
+        "Не сгорают при сбросе.\n\n"
+        "Выберите пакет:"
+    )
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=token_packs_kb())
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=token_packs_kb())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("buy_pack_"))
+async def cb_buy_pack(callback: CallbackQuery):
+    uid = callback.from_user.id
+    pk = callback.data.replace("buy_pack_", "")
+    pack = TOKEN_PACKS.get(pk)
+    if not pack:
+        await callback.answer("Пакет не найден", show_alert=True)
+        return
+    PAYMENT_PROVIDER = os.getenv("PAYMENT_PROVIDER_TOKEN", "")
+    if not PAYMENT_PROVIDER:
+        await callback.answer("Покупка временно недоступна. Напишите @helphuza", show_alert=True)
+        return
+    try:
+        await bot.send_invoice(
+            chat_id=uid,
+            title=pack["label"],
+            description=f"{pack['requests']} запросов к ИИ",
+            payload=f"pack_{pk}_{uid}",
+            provider_token=PAYMENT_PROVIDER,
+            currency="RUB",
+            prices=[LabeledPrice(label=pack["label"], amount=pack["price"] * 100)],
+            start_parameter=f"pack_{pk}",
+        )
+        await callback.answer()
+    except Exception as e:
+        logging.warning(f"send_invoice pack: {e}")
+        await callback.answer("Ошибка платежа. @helphuza", show_alert=True)
+
+
+@dp.message(F.successful_payment)
+async def handle_pack_payment(message: Message):
+    uid = message.from_user.id
+    payload = message.successful_payment.invoice_payload or ""
+    if not payload.startswith("pack_"):
+        return
+    parts = payload.split("_")
+    if len(parts) < 3:
+        return
+    pk = parts[1]
+    pack = TOKEN_PACKS.get(pk)
+    if not pack:
+        return
+    user_extra_requests[uid] = user_extra_requests.get(uid, 0) + pack["requests"]
+    asyncio.create_task(_db_save_extra_requests(uid))
+    # Партнёрка уровня 2: % с оплаты реферала
+    for inv_uid, ref_data in user_referrals.items():
+        if uid in ref_data.get("refs", []):
+            bonus = int(pack["price"] * REF_BONUS_PAYMENT_PCT / 100)
+            if bonus > 0:
+                user_ref_earnings[inv_uid] = user_ref_earnings.get(inv_uid, 0) + bonus
+                user_extra_requests[inv_uid] = user_extra_requests.get(inv_uid, 0) + bonus
+                asyncio.create_task(_db_save_extra_requests(inv_uid))
+                asyncio.create_task(_db_save_ref_earnings(inv_uid))
+                try:
+                    await bot.send_message(
+                        inv_uid,
+                        premium_html(
+                            f"🤝 <b>Реферальный доход!</b>\n\n"
+                            f"Ваш реферал купил пакет запросов.\n"
+                            f"✅ Вам: <b>+{bonus} запросов</b> ({REF_BONUS_PAYMENT_PCT}%)\n"
+                            f"💰 Всего с рефералов: <b>{user_ref_earnings.get(inv_uid, 0)} запр.</b>"
+                        ),
+                        parse_mode="HTML"
+                    )
+                except Exception:
+                    pass
+            break
+    await message.answer(
+        premium_html(
+            f"🎉 <b>Оплата прошла!</b>\n\n"
+            f"✅ Зачислено: <b>+{pack['requests']} запросов</b>\n"
+            f"💼 В пакете: <b>{user_extra_requests.get(uid, 0)} запросов</b>\n\n"
+            "Запросы из пакета тратятся когда исчерпан суточный лимит."
+        ),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Главная", callback_data="back_home", icon_custom_emoji_id=PE["home"])
+        ]])
+    )
+
+
+# ── Кнопки при исчерпании лимита ──────────────────────────
+
+def _limit_exhausted_kb(uid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Купить подписку",    callback_data="sub_menu",        icon_custom_emoji_id=PE["wallet"])],
+        [InlineKeyboardButton(text="Купить запросы",     callback_data="menu_token_packs", icon_custom_emoji_id=PE["money"])],
+        [InlineKeyboardButton(text="Когда сбросится?",  callback_data="limit_reset_time", icon_custom_emoji_id=PE["clock"])],
+        [InlineKeyboardButton(text="Ежедневный бонус",   callback_data="menu_daily_bonus", icon_custom_emoji_id=PE["gift"])],
+    ])
+
+
+@dp.callback_query(F.data == "limit_reset_time")
+async def cb_limit_reset_time(callback: CallbackQuery):
+    uid = callback.from_user.id
+    rst = _reset_str(uid, "pro")
+    extra = user_extra_requests.get(uid, 0)
+    can_daily = _can_claim_daily_bonus(uid)
+    parts = [f"⏰ Лимит сбросится через: {rst}"]
+    if extra > 0:
+        parts.append(f"💰 Запросов в пакете: {extra}")
+    if can_daily:
+        parts.append("🎁 Есть доступный ежедневный бонус!")
+    await callback.answer("\n".join(parts), show_alert=True)
+
+
+# ── История диалогов /history ──────────────────────────────
+
+def _history_kb(uid: int, page: int = 0) -> InlineKeyboardMarkup:
+    hist = user_history.get(uid, [])
+    page_size = 5
+    start = page * page_size
+    items = hist[start:start + page_size]
+    rows = []
+    for i, h in enumerate(items):
+        idx = start + i
+        q = h.get("q", "")[:32] + ("…" if len(h.get("q", "")) > 32 else "")
+        ts = h.get("ts", "")[:10] if h.get("ts") else ""
+        rows.append([InlineKeyboardButton(text=f"{ts}  {q}", callback_data=f"history_view_{idx}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◁ Назад", callback_data=f"history_page_{page-1}"))
+    if start + page_size < len(hist):
+        nav.append(InlineKeyboardButton(text="Далее ▷", callback_data=f"history_page_{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="Закрыть", callback_data="back_home", icon_custom_emoji_id=PE["home"])])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(Command("history"))
+async def cmd_history(message: Message):
+    uid = message.from_user.id
+    hist = user_history.get(uid, [])
+    if not hist:
+        await message.answer(
+            premium_html("📋 <b>История пуста</b>\n\nНачни диалог — он появится здесь."),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Написать", callback_data="menu_ask", icon_custom_emoji_id=PE["write"])
+            ]])
+        )
+        return
+    text = premium_html(f"📋 <b>История диалогов</b>\n\nВсего: <b>{len(hist)}</b>\n\nНажми на запрос чтобы продолжить:")
+    await message.answer(text, parse_mode="HTML", reply_markup=_history_kb(uid, 0))
+
+
+@dp.callback_query(F.data == "show_history")
+async def cb_show_history(callback: CallbackQuery):
+    uid = callback.from_user.id
+    hist = user_history.get(uid, [])
+    if not hist:
+        await callback.answer("История пуста", show_alert=True)
+        return
+    text = premium_html(f"📋 <b>История диалогов</b>\n\nВсего: <b>{len(hist)}</b>")
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_history_kb(uid, 0))
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=_history_kb(uid, 0))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("history_page_"))
+async def cb_history_page(callback: CallbackQuery):
+    uid = callback.from_user.id
+    page = int(callback.data.replace("history_page_", ""))
+    hist = user_history.get(uid, [])
+    text = premium_html(f"📋 <b>История диалогов</b>\n\nВсего: {len(hist)}")
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_history_kb(uid, page))
+    except Exception:
+        pass
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("history_view_"))
+async def cb_history_view(callback: CallbackQuery):
+    uid = callback.from_user.id
+    idx = int(callback.data.replace("history_view_", ""))
+    hist = user_history.get(uid, [])
+    if idx >= len(hist):
+        await callback.answer("Запись не найдена", show_alert=True)
+        return
+    h = hist[idx]
+    q = h.get("q", "")
+    a = h.get("a", "")
+    mk = h.get("model", "")
+    ts = h.get("ts", "")
+    model_label = MODELS.get(mk, {}).get("label", mk) if mk else "—"
+    text = (
+        f"📋 <b>Запись</b>  <code>{ts[:16]}</code>\n"
+        f"🤖 <code>{model_label}</code>\n\n"
+        f"<b>Вопрос:</b>\n{q[:800]}\n\n"
+        f"<b>Ответ:</b>\n{a[:1200]}"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Продолжить", callback_data="menu_ask",     icon_custom_emoji_id=PE["write"])],
+        [InlineKeyboardButton(text="История",    callback_data="show_history", icon_custom_emoji_id=PE["file"])],
+        [InlineKeyboardButton(text="Главная",    callback_data="back_home",    icon_custom_emoji_id=PE["home"])],
+    ])
+    try:
+        await callback.message.edit_text(text[:4000], parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text[:4000], parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
+
+
+# ── Онбординг новых пользователей ─────────────────────────
+
+ONBOARD_TEXTS = [
+    premium_html(
+        "🚀 <b>Добро пожаловать в ХУЗА ИИ!</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Шаг <b>1 из 3</b>\n\n"
+        "🤖 Здесь <b>28 нейросетей</b>:\n"
+        "◈ Claude · GPT · Gemini · DeepSeek\n"
+        "◈ Анализ фото 📸\n"
+        "◈ Картинки · Музыка · Видео 🎨\n\n"
+        "Просто пиши вопрос — ИИ ответит за секунды!"
+    ),
+    premium_html(
+        "💬 <b>Как задать вопрос?</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Шаг <b>2 из 3</b>\n\n"
+        "◈ Напиши любой вопрос в чат\n"
+        "◈ Отправь фото — ИИ его проанализирует\n"
+        "◈ Нажми <b>«Написать»</b> в главном меню\n"
+        "◈ Используй /img для генерации картинок\n\n"
+        "У тебя <b>25 запросов</b> бесплатно каждые 12 часов!"
+    ),
+    premium_html(
+        "💎 <b>Подписка и бонусы</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "Шаг <b>3 из 3</b>\n\n"
+        f"🎁 Тебе выдан <b>пробный период {TRIAL_DAYS} дня</b>!\n\n"
+        "◈ Подписка — все 28 нейросетей без ограничений\n"
+        "◈ Ежедневный бонус +2 запроса каждый день\n"
+        "◈ Стрик активности — бонус за 7/14/30 дней\n\n"
+        "🔗 Приглашай друзей — <b>+5 запросов</b> за каждого!"
+    ),
+]
+
+_onboard_shown: set = set()
+
+
+def _onboard_kb(step: int) -> InlineKeyboardMarkup:
+    if step < 3:
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Дальше ▷", callback_data=f"onboard_step{step+1}", icon_custom_emoji_id=PE["check"])
+        ]])
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Начать!", callback_data="onboard_finish", icon_custom_emoji_id=PE["party"])
+    ]])
+
+
+async def _show_onboard(message, uid: int, state: FSMContext):
+    if uid in _onboard_shown:
+        return
+    _onboard_shown.add(uid)
+    await message.answer(ONBOARD_TEXTS[0], parse_mode="HTML", reply_markup=_onboard_kb(1))
+    await state.set_state(OnboardStates.step1)
+
+
+@dp.callback_query(F.data == "onboard_step2")
+async def cb_onboard_step2(callback: CallbackQuery, state: FSMContext):
+    try:
+        await callback.message.edit_text(ONBOARD_TEXTS[1], parse_mode="HTML", reply_markup=_onboard_kb(2))
+    except Exception:
+        await callback.message.answer(ONBOARD_TEXTS[1], parse_mode="HTML", reply_markup=_onboard_kb(2))
+    await state.set_state(OnboardStates.step2)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "onboard_step3")
+async def cb_onboard_step3(callback: CallbackQuery, state: FSMContext):
+    try:
+        await callback.message.edit_text(ONBOARD_TEXTS[2], parse_mode="HTML", reply_markup=_onboard_kb(3))
+    except Exception:
+        await callback.message.answer(ONBOARD_TEXTS[2], parse_mode="HTML", reply_markup=_onboard_kb(3))
+    await state.set_state(OnboardStates.step3)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "onboard_finish")
+async def cb_onboard_finish(callback: CallbackQuery, state: FSMContext):
+    uid = callback.from_user.id
+    name = callback.from_user.first_name or "Пользователь"
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    tok = get_tokens(uid)
+    await callback.message.answer(
+        _welcome_text(name, tok, uid in ADMIN_IDS),
+        parse_mode="HTML",
+        reply_markup=home_kb(uid)
+    )
+    await callback.answer("🎉 Добро пожаловать!")
+
+
+# ── Аналитика /admin_charts ────────────────────────────────
+
+@dp.message(Command("admin_charts"))
+async def cmd_admin_charts(message: Message):
+    uid = message.from_user.id
+    if uid not in ADMIN_IDS:
+        return
+    if not db_pool:
+        await message.answer("❌ БД недоступна")
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            model_rows = await conn.fetch("""
+                SELECT model_key, COUNT(*) as cnt
+                FROM model_stats
+                WHERE ts >= NOW() - INTERVAL '30 days'
+                GROUP BY model_key ORDER BY cnt DESC LIMIT 10
+            """)
+            hour_rows = await conn.fetch("""
+                SELECT EXTRACT(HOUR FROM ts + INTERVAL '3 hours') as hour, COUNT(*) as cnt
+                FROM model_stats
+                WHERE ts >= NOW() - INTERVAL '7 days'
+                GROUP BY hour ORDER BY hour
+            """)
+            total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+            sub_users   = await conn.fetchval("SELECT COUNT(*) FROM users WHERE sub_expires > NOW()")
+            new_7d      = await conn.fetchval("SELECT COUNT(*) FROM users WHERE joined >= NOW()::date - 7")
+
+        import io as _io
+        fig = plt.figure(figsize=(14, 10), facecolor='#1a1a2e')
+        import matplotlib.gridspec as _gs
+        grid = _gs.GridSpec(2, 2, figure=fig, hspace=0.4, wspace=0.3)
+        dark_bg = '#1a1a2e'; card_bg = '#16213e'
+        accent = '#4d8fff'; accent2 = '#9b5de5'; text_c = '#e0e0ff'
+
+        # Топ моделей
+        ax1 = fig.add_subplot(grid[0, :])
+        ax1.set_facecolor(card_bg)
+        if model_rows:
+            labels = [r["model_key"][:20] for r in model_rows]
+            values = [r["cnt"] for r in model_rows]
+            bars = ax1.barh(labels, values, color=accent, edgecolor='none', height=0.6)
+            for bar, val in zip(bars, values):
+                ax1.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2,
+                         str(val), va='center', color=text_c, fontsize=9)
+        ax1.set_title("🤖 Топ моделей (30 дней)", color=text_c, fontsize=12, pad=10)
+        ax1.tick_params(colors=text_c, labelsize=8)
+        ax1.spines[:].set_color('#333366')
+
+        # Активность по часам
+        ax2 = fig.add_subplot(grid[1, 0])
+        ax2.set_facecolor(card_bg)
+        if hour_rows:
+            hours  = [int(r["hour"]) for r in hour_rows]
+            counts = [r["cnt"] for r in hour_rows]
+            ax2.fill_between(hours, counts, alpha=0.4, color=accent2)
+            ax2.plot(hours, counts, color=accent2, linewidth=2)
+            ax2.set_xlabel("Час МСК", color=text_c)
+            ax2.set_ylabel("Запросов", color=text_c)
+            ax2.tick_params(colors=text_c, labelsize=8)
+        ax2.set_title("⏰ Активность по часам (7д)", color=text_c, fontsize=11, pad=8)
+        ax2.spines[:].set_color('#333366')
+
+        # Конверсия в подписку
+        ax3 = fig.add_subplot(grid[1, 1])
+        ax3.set_facecolor(card_bg)
+        conv_pct = round(sub_users / total_users * 100, 1) if total_users else 0
+        if sub_users < total_users:
+            ax3.pie(
+                [sub_users, total_users - sub_users],
+                labels=[f"Подписка\n{sub_users}", f"Бесплатно\n{total_users - sub_users}"],
+                colors=[accent, '#333366'],
+                autopct='%1.1f%%',
+                textprops={'color': text_c, 'fontsize': 9},
+                wedgeprops={'edgecolor': dark_bg, 'linewidth': 2},
+                startangle=90,
+            )
+        ax3.set_title(f"💎 Конверсия: {conv_pct}%", color=text_c, fontsize=11, pad=8)
+        fig.suptitle("📊 Аналитика ХУЗА ИИ", color=text_c, fontsize=14, y=0.98)
+
+        buf = _io.BytesIO()
+        plt.savefig(buf, format='png', dpi=130, bbox_inches='tight', facecolor=dark_bg)
+        plt.close(fig)
+        buf.seek(0)
+
+        caption = premium_html(
+            f"📊 <b>Аналитика бота</b>\n\n"
+            f"👥 Пользователей: <b>{total_users}</b>\n"
+            f"💎 С подпиской: <b>{sub_users}</b> ({conv_pct}%)\n"
+            f"🆕 Новых за 7 дней: <b>{new_7d}</b>\n\n"
+            f"Топ: <code>{model_rows[0]['model_key'] if model_rows else '—'}</code>"
+        )
+        await message.answer_photo(
+            BufferedInputFile(buf.read(), filename="charts.png"),
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Обновить", callback_data="admin_charts_refresh", icon_custom_emoji_id=PE["loading"]),
+                InlineKeyboardButton(text="Админ",    callback_data="menu_admin",           icon_custom_emoji_id=PE["settings"]),
+            ]])
+        )
+    except Exception as e:
+        logging.error(f"admin_charts: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+@dp.callback_query(F.data == "admin_charts_refresh")
+async def cb_admin_charts_refresh(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if uid not in ADMIN_IDS:
+        await callback.answer()
+        return
+    await callback.answer("Обновляю...")
+    await cmd_admin_charts(callback.message)
+
+
+# ── Реферальная ссылка (обновлённая с доходами) ────────────
+
+@dp.callback_query(F.data == "profile_reflink")
+async def cb_reflink_v2(callback: CallbackQuery):
+    uid = callback.from_user.id
+    refs = user_referrals.get(uid, {}).get("refs", [])
+    earnings = user_ref_earnings.get(uid, 0)
+    extra = user_extra_requests.get(uid, 0)
+    try:
+        bot_info = await bot.get_me()
+        ref_link = f"https://t.me/{bot_info.username}?start=ref_{uid}"
+    except Exception:
+        ref_link = f"https://t.me/хузабот?start=ref_{uid}"
+    text = premium_html(
+        "🔗 <b>Партнёрская программа</b>\n\n"
+        f"👥 Приглашено: <b>{len(refs)}</b> чел.\n"
+        f"💰 Заработано: <b>{earnings} запросов</b>\n"
+        f"💼 Доп. запросов: <b>{extra}</b>\n\n"
+        "Как работает:\n"
+        f"◈ За нового пользователя: <b>+{REF_BONUS_INVITER} запросов</b>\n"
+        f"◈ С каждой покупки реферала: <b>{REF_BONUS_PAYMENT_PCT}%</b> навсегда\n\n"
+        f"🔗 Ваша ссылка:\n<code>{ref_link}</code>"
+    )
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="Назад", callback_data="menu_profile", icon_custom_emoji_id=PE["home"])
+    ]])
+    try:
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    await callback.answer()
 
 
 # ══════════════════════════════════════════════════════════════
