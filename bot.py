@@ -13370,6 +13370,55 @@ async def cb_pay_platega(callback: CallbackQuery):
 
     logging.info(f"[PLATEGA] Создаю платёж uid={uid} plan={plan_key} order={order_id} "
                  f"amount={plan['price']} url={PLATEGA_API_URL}")
+
+    # ── Внутренняя утилита: уведомить всех админов о проблеме Platega ──
+    async def _notify_admins_platega(http_status: int, raw_body: str, exc: Exception | None = None):
+        import traceback as _tb
+        import datetime as _dtt
+        timestamp = _dtt.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        # Очищаем тело ответа: убираем HTML-теги для читаемости
+        import re as _re
+        clean_body = _re.sub(r"<[^>]+>", "", raw_body).strip()
+        clean_body = _re.sub(r"\s{2,}", " ", clean_body)[:600]
+        tb_text = ""
+        if exc is not None:
+            tb_text = f"\n\n<b>📋 Traceback:</b>\n<pre>{_tb.format_exc()[-2000:]}</pre>"
+        admin_text = (
+            f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> <b>ОШИБКА PLATEGA</b>\n\n'
+            f"<b>🕐 Время:</b> {timestamp}\n"
+            f"<b>👤 Пользователь:</b> <code>{uid}</code>\n"
+            f"<b>📦 Тариф:</b> <code>{plan_key}</code> — {plan['name']} ({plan['price']} ₽)\n"
+            f"<b>🆔 Order ID:</b> <code>{order_id}</code>\n"
+            f"<b>⚠️ HTTP статус:</b> <code>{http_status}</code>\n"
+            f"<b>💬 Ответ сервиса:</b>\n<pre>{clean_body}</pre>"
+            f"{tb_text}"
+        )
+        for _admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(_admin_id, admin_text, parse_mode="HTML")
+            except Exception as _send_err:
+                logging.error(f"[PLATEGA] Не удалось уведомить админа {_admin_id}: {_send_err}")
+
+    # ── Клавиатура при ошибке ──
+    def _error_keyboard():
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="ЮKassa — оплатить",
+                callback_data=f"pay_yukassa_{plan_key}",
+                icon_custom_emoji_id=PE["money_receive"]
+            )],
+            [InlineKeyboardButton(
+                text="Повторить попытку",
+                callback_data=f"pay_platega_{plan_key}",
+                icon_custom_emoji_id=PE["loading"]
+            )],
+            [InlineKeyboardButton(
+                text="Назад",
+                callback_data=f"sub_buy_{plan_key}",
+                icon_custom_emoji_id="5892627217459876335"
+            )],
+        ])
+
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12, connect=6)) as sess:
             async with sess.post(PLATEGA_API_URL, json=payload, headers=headers) as resp:
@@ -13389,11 +13438,20 @@ async def cb_pay_platega(callback: CallbackQuery):
         if not redirect:
             err_detail = data.get("message") or data.get("error") or raw[:200]
             logging.error(f"[PLATEGA] Нет ссылки в ответе uid={uid}: {err_detail}")
-            raise ValueError(f"HTTP {status_code}: {err_detail}")
+            # Уведомляем админов с полным телом ответа (включая HTML 502 и т.д.)
+            await _notify_admins_platega(status_code, raw)
+            # Пользователю — только человеческий текст
+            await callback.message.edit_text(
+                f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> <b>Платёжный сервис временно недоступен.</b>\n\n'
+                f'Оплати через ЮKassa или обратись в поддержку: @helphuza',
+                parse_mode="HTML",
+                reply_markup=_error_keyboard(),
+            )
+            return
 
         logging.info(f"[PLATEGA] Платёж создан uid={uid} order={order_id} link={redirect}")
         await callback.message.edit_text(
-            f"✅ <b>Платёж создан!</b>\n\n"
+            f'<tg-emoji emoji-id="{PE["check"]}">✅</tg-emoji> <b>Платёж создан!</b>\n\n'
             f"◆ Тариф — <b>{plan['name']}</b>\n"
             f"◆ Цена — <b>{plan['price']} ₽</b>\n"
             f"◆ Заказ — <code>{order_id}</code>\n\n"
@@ -13401,29 +13459,44 @@ async def cb_pay_platega(callback: CallbackQuery):
             f"После оплаты подписка активируется автоматически.",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="💳 Оплатить через Platega", url=redirect)],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data=f"sub_buy_{plan_key}")],
+                [InlineKeyboardButton(
+                    text="Оплатить через Platega",
+                    url=redirect,
+                    icon_custom_emoji_id=PE["wallet"]
+                )],
+                [InlineKeyboardButton(
+                    text="Назад",
+                    callback_data=f"sub_buy_{plan_key}",
+                    icon_custom_emoji_id="5892627217459876335"
+                )],
             ]),
         )
-    except Exception as e:
-        logging.error(f"[PLATEGA] Ошибка создания платежа uid={uid} plan={plan_key}: {e}")
-        # Определяем тип ошибки для понятного сообщения
-        _err_str = str(e).lower()
-        if "name or service not known" in _err_str or "cannot connect" in _err_str or "connection" in _err_str:
-            _err_msg = "Платёжный сервис временно недоступен."
-        elif "timeout" in _err_str:
-            _err_msg = "Сервис не ответил вовремя. Попробуй ещё раз."
-        else:
-            _err_msg = "Не удалось создать платёж."
+    except aiohttp.ClientConnectorError as e:
+        logging.error(f"[PLATEGA] Нет соединения uid={uid}: {e}")
+        await _notify_admins_platega(0, f"ClientConnectorError: {e}", exc=e)
         await callback.message.edit_text(
-            f"❌ <b>{_err_msg}</b>\n\n"
-            f"Оплати через ЮKassa или обратись в поддержку: @helphuza",
+            f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> <b>Платёжный сервис временно недоступен.</b>\n\n'
+            f'Оплати через ЮKassa или обратись в поддержку: @helphuza',
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🏧 ЮKassa — оплатить", callback_data=f"pay_yukassa_{plan_key}")],
-                [InlineKeyboardButton(text="🔄 Повторить попытку", callback_data=f"pay_platega_{plan_key}")],
-                [InlineKeyboardButton(text="◀️ Назад", callback_data=f"sub_buy_{plan_key}")],
-            ]),
+            reply_markup=_error_keyboard(),
+        )
+    except aiohttp.ServerTimeoutError as e:
+        logging.error(f"[PLATEGA] Таймаут uid={uid}: {e}")
+        await _notify_admins_platega(0, f"ServerTimeoutError: {e}", exc=e)
+        await callback.message.edit_text(
+            f'<tg-emoji emoji-id="{PE["clock"]}">⏰</tg-emoji> <b>Платёжный сервис не отвечает.</b>\n\n'
+            f'Попробуй повторить или оплати через ЮKassa.',
+            parse_mode="HTML",
+            reply_markup=_error_keyboard(),
+        )
+    except Exception as e:
+        logging.error(f"[PLATEGA] Ошибка создания платежа uid={uid} plan={plan_key}: {e}", exc_info=True)
+        await _notify_admins_platega(0, str(e), exc=e)
+        await callback.message.edit_text(
+            f'<tg-emoji emoji-id="{PE["cross"]}">❌</tg-emoji> <b>Платёжный сервис временно недоступен.</b>\n\n'
+            f'Оплати через ЮKassa или обратись в поддержку: @helphuza',
+            parse_mode="HTML",
+            reply_markup=_error_keyboard(),
         )
 
 
