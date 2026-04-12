@@ -1391,6 +1391,74 @@ admin_await = {}
 report_states: dict = {}  # uid -> dict с настройками доклада для генерации
 pptx_states: dict  = {}  # uid -> dict с настройками презентации
 
+
+# ══════════════════════════════════════════════════════════════
+# 🚫 ПАТЧ 2: СИСТЕМА БАНА ПОЛЬЗОВАТЕЛЕЙ
+# ══════════════════════════════════════════════════════════════
+banned_users: set = set()  # uid заблокированных пользователей (in-memory)
+
+async def db_load_banned():
+    """Загружает список забаненных из БД."""
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS banned_users (
+                    uid BIGINT PRIMARY KEY,
+                    reason TEXT DEFAULT '',
+                    banned_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+            rows = await conn.fetch("SELECT uid FROM banned_users")
+            for row in rows:
+                banned_users.add(row["uid"])
+        logging.info(f"✅ Загружено банов: {len(banned_users)}")
+    except Exception as e:
+        logging.warning(f"db_load_banned: {e}")
+
+async def db_ban_user(uid: int, reason: str = ""):
+    banned_users.add(uid)
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO banned_users (uid, reason) VALUES ($1, $2) ON CONFLICT (uid) DO UPDATE SET reason=$2",
+                uid, reason
+            )
+    except Exception as e:
+        logging.warning(f"db_ban_user: {e}")
+
+async def db_unban_user(uid: int):
+    banned_users.discard(uid)
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM banned_users WHERE uid=$1", uid)
+    except Exception as e:
+        logging.warning(f"db_unban_user: {e}")
+
+
+class BanMiddleware(BaseMiddleware):
+    """ПАТЧ 2: Блокирует сообщения от забаненных пользователей."""
+    async def __call__(self, handler, event, data):
+        uid = None
+        if isinstance(event, Message):
+            uid = event.from_user.id if event.from_user else None
+        elif isinstance(event, CallbackQuery):
+            uid = event.from_user.id if event.from_user else None
+        if uid and uid in banned_users:
+            if isinstance(event, Message):
+                try:
+                    await event.answer("🚫 Вы заблокированы в этом боте.")
+                except Exception:
+                    pass
+            return  # блокируем
+        return await handler(event, data)
+
+
 ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "5613085898").split(",") if x.strip().isdigit()}
 
 # ── Лимиты запросов ─────────────────────────────────────────────
@@ -1769,7 +1837,6 @@ async def init_db():
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_expires TIMESTAMPTZ DEFAULT NULL",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_plan TEXT DEFAULT ''",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS favorites TEXT DEFAULT '[]'",
-                "ALTER TABLE users ADD COLUMN IF NOT EXISTS favorites TEXT DEFAULT '[]'",
                 # Музыка и расширенная статистика
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS music_used INT DEFAULT 0",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS music_reset TIMESTAMPTZ DEFAULT NOW()",
@@ -1779,6 +1846,7 @@ async def init_db():
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS total_music INT DEFAULT 0",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS total_docs INT DEFAULT 0",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS last_model TEXT DEFAULT ''",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS tts_enabled BOOLEAN DEFAULT FALSE",  # ПАТЧ 10
                 # Удаляем старые веб-колонки если есть (мягко)
                 "ALTER TABLE users DROP COLUMN IF EXISTS web_used",
                 "ALTER TABLE users DROP COLUMN IF EXISTS web_reset",
@@ -1867,6 +1935,49 @@ async def init_db():
     except Exception as e:
         logging.error(f"❌ PostgreSQL: {e}")
         db_pool = None
+
+
+
+async def db_load_chat_history():
+    """ПАТЧ 1: Загружает историю чатов из БД в user_history при старте."""
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT uid, messages FROM chat_history WHERE session_id='tg_main' ORDER BY updated_at DESC"
+            )
+        count = 0
+        for row in rows:
+            uid = row["uid"]
+            try:
+                msgs = json.loads(row["messages"] or "[]")
+                if isinstance(msgs, list) and msgs:
+                    from collections import deque as _dq
+                    user_history[uid] = msgs[-50:]  # последние 50 сообщений
+                    count += 1
+            except Exception:
+                pass
+        logging.info(f"✅ Загружено история чатов: {count} пользователей")
+    except Exception as e:
+        logging.error(f"db_load_chat_history: {e}")
+
+
+async def db_save_chat_history_tg(uid: int):
+    """ПАТЧ 1: Сохраняет user_history[uid] в БД (session_id='tg_main')."""
+    if not db_pool:
+        return
+    hist = user_history.get(uid, [])
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO chat_history (uid, session_id, messages, updated_at) "
+                "VALUES ($1, 'tg_main', $2::jsonb, NOW()) "
+                "ON CONFLICT (uid, session_id) DO UPDATE SET messages=$2::jsonb, updated_at=NOW()",
+                uid, json.dumps(hist, ensure_ascii=False)
+            )
+    except Exception as e:
+        logging.warning(f"db_save_chat_history_tg uid={uid}: {e}")
 
 
 async def db_save_bot_settings():
@@ -2013,10 +2124,19 @@ async def db_load_all_users():
                 loaded_feats = _j.loads(feats_raw)
             except Exception:
                 loaded_feats = {}
+            # ПАТЧ 10: загружаем tts_enabled из колонки БД
+            _tts = False
+            try:
+                _keys = row.keys() if hasattr(row, "keys") else []
+                if "tts_enabled" in _keys and row["tts_enabled"] is not None:
+                    _tts = bool(row["tts_enabled"])
+            except Exception:
+                pass
             user_features[uid] = {
                 "doc_analysis": loaded_feats.get("doc_analysis", False),
                 "answer_mode":  loaded_feats.get("answer_mode", "fast"),
                 "auto_model":   loaded_feats.get("auto_model", False),
+                "tts_enabled":  _tts,
             }
             # Загружаем requests из БД если есть
             _req = 0
@@ -2388,6 +2508,8 @@ background_tasks: list[asyncio.Task] = []
 _limit_notify_cd: dict = {}
 
 # ── Подключаем middleware проверки соглашения ко ВСЕМ апдейтам ──
+dp.message.middleware(BanMiddleware())      # ПАТЧ 2: бан
+dp.callback_query.middleware(BanMiddleware())  # ПАТЧ 2: бан
 dp.message.middleware(AntiSpamMiddleware())
 dp.message.middleware(TermsMiddleware())
 dp.callback_query.middleware(TermsMiddleware())
@@ -13464,6 +13586,7 @@ async def show_admin_panel(msg_or_cb):
         [InlineKeyboardButton(text="🔌 Сервисы вкл/выкл", callback_data="admin_services")],
         [InlineKeyboardButton(text="🗑 Сброс памяти",   callback_data="admin_reset_memory")],
         [InlineKeyboardButton(text="🔄 Сброс лимитов юзера", callback_data="admin_reset_limits")],
+        [InlineKeyboardButton(text="🚫 Управление банами", callback_data="admin_ban_menu")],  # ПАТЧ 2
         [InlineKeyboardButton(text="🏠 Главная",         callback_data="back_home")],
     ])
     text = (
@@ -16448,11 +16571,12 @@ async def handle_text(message: Message, state: FSMContext):
                 "q": (message.text or "")[:200], "a": ans[:600],
                 "model": mk, "ts": _dt2.datetime.now().strftime("%d.%m %H:%M")
             })
-            user_history[uid] = user_history[uid][-10:]
+            user_history[uid] = user_history[uid][-50:]
             if uid in user_profiles:
                 user_profiles[uid]["requests"] = user_profiles[uid].get("requests", 0) + 1
             spend_limit(uid, mk)
             asyncio.create_task(db_save_user(uid, message.from_user.first_name or "", message.from_user.username or ""))
+            asyncio.create_task(db_save_chat_history_tg(uid))  # ПАТЧ 1: сохраняем историю
 
             try:
                 await think_msg.delete()
@@ -16467,6 +16591,17 @@ async def handle_text(message: Message, state: FSMContext):
                 _main_kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="🌐 Красиво", url=_view_url)]
                 ] + _main_kb.inline_keyboard)
+            except Exception:
+                pass
+            # ПАТЧ 4: кнопки оценки ответа
+            try:
+                _fb_row = [
+                    AiogramInlineKeyboardButton(text="👍", callback_data=f"feedback_up_{mk}"),
+                    AiogramInlineKeyboardButton(text="👎", callback_data=f"feedback_down_{mk}"),
+                ]
+                _main_kb = InlineKeyboardMarkup(
+                    inline_keyboard=(_main_kb.inline_keyboard if _main_kb else []) + [_fb_row]
+                )
             except Exception:
                 pass
 
@@ -20710,6 +20845,16 @@ async def cmd_tts(message: Message):
     feats["tts_enabled"] = not cur
     user_features[uid] = feats
     state = "✅ включены" if feats["tts_enabled"] else "❌ выключены"
+    # ПАТЧ 10: сохраняем в БД
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE users SET tts_enabled=$1 WHERE uid=$2",
+                    feats["tts_enabled"], uid
+                )
+        except Exception as _e:
+            logging.warning(f"tts save: {_e}")
     await message.answer(
         f"🔊 Голосовые ответы {state}\n\n"
         f"Когда вы отправляете голосовое — бот ответит тоже голосом.",
@@ -20877,7 +21022,7 @@ async def inline_query_handler(inline_query: InlineQuery):
                 title=f"Задай вопрос {BOT_NAME}",
                 description="Напиши вопрос после @username бота",
                 input_message_content=InputTextMessageContent(
-                    message_text=f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> Напиши свой вопрос после @username бота',
+                    message_text=f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> Напиши вопрос: <code>@iihuzandelpiibot твой вопрос</code>',
                     parse_mode="HTML"
                 ),
             )
@@ -20888,27 +21033,29 @@ async def inline_query_handler(inline_query: InlineQuery):
     bot_info = await bot.get_me()
     deep_link = f"https://t.me/{bot_info.username}?start=q_{query[:50].replace(' ', '_')}"
 
+    # ПАТЧ inline: полный ответ ИИ прямо в чате (до 300 токенов, таймаут 8 сек)
     answer_text = ""
-    if len(query) <= 200:
-        try:
-            _msgs = [
-                {"role": "system", "content": f"Ты — {BOT_NAME}. Отвечай ОЧЕНЬ кратко — 1-2 предложения max."},
-                {"role": "user", "content": query}
-            ]
-            answer_text = await asyncio.wait_for(
-                call_chat(_msgs, "claude_haiku", max_tokens=80),
-                timeout=3.5
-            )
-        except Exception:
-            pass
+    try:
+        _sys = f"Ты — {BOT_NAME}, умный ИИ-ассистент. Отвечай ёмко и по делу на языке вопроса. Максимум 3-4 предложения."
+        _msgs = [
+            {"role": "system", "content": _sys},
+            {"role": "user", "content": query}
+        ]
+        answer_text = await asyncio.wait_for(
+            call_chat(_msgs, "claude_haiku", max_tokens=300),
+            timeout=8.0
+        )
+    except Exception:
+        pass
 
     if answer_text:
-        preview = answer_text[:100] + ("..." if len(answer_text) > 100 else "")
+        preview = answer_text[:120] + ("..." if len(answer_text) > 120 else "")
+        # Полный ответ прямо в сообщении
         full_msg = (
-            f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>{BOT_NAME}</b>\n\n'
-            f'<b>Вопрос:</b> {query}\n\n'
-            f'<b>Ответ:</b> {answer_text}\n\n'
-            f'<i>Открой бота для полного ответа и продолжения диалога 👇</i>'
+            f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>{BOT_NAME}</b>\n'
+            f'<b>❓ {query[:200]}</b>\n\n'
+            f'{answer_text[:3500]}\n\n'
+            f'<i>Продолжить диалог → открой бота</i>'
         )
         results = [
             InlineQueryResultArticle(
@@ -20920,8 +21067,8 @@ async def inline_query_handler(inline_query: InlineQuery):
                     parse_mode="HTML"
                 ),
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text=f"Открыть {BOT_NAME}",
+                    AiogramInlineKeyboardButton(
+                        text=f"🤖 Открыть {BOT_NAME}",
                         url=deep_link,
                     )
                 ]])
@@ -20931,27 +21078,27 @@ async def inline_query_handler(inline_query: InlineQuery):
         full_msg = (
             f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>{BOT_NAME}</b>\n\n'
             f'<b>Вопрос:</b> {query}\n\n'
-            f'<i>Нажми кнопку ниже чтобы получить ответ в боте</i>'
+            f'<i>Нажми кнопку ниже чтобы получить ответ в боте 👇</i>'
         )
         results = [
             InlineQueryResultArticle(
                 id=f"ask_{hash(query) % 100000}",
-                title=f"🤖 Спросить: {query[:50]}",
-                description=f"Получить ответ от {BOT_NAME}",
+                title=f"🤖 Спросить {BOT_NAME}: {query[:40]}",
+                description=f"Нажми чтобы отправить вопрос",
                 input_message_content=InputTextMessageContent(
                     message_text=full_msg,
                     parse_mode="HTML"
                 ),
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text=f"Открыть {BOT_NAME}",
+                    AiogramInlineKeyboardButton(
+                        text=f"🤖 Открыть {BOT_NAME}",
                         url=deep_link,
                     )
                 ]])
             )
         ]
 
-    await inline_query.answer(results, cache_time=30, is_personal=True)
+    await inline_query.answer(results, cache_time=15, is_personal=True)
 
 
 # ==================================================================
@@ -21091,99 +21238,6 @@ async def admin_receive_uid_for_reset(message: Message, state: FSMContext):
     )
 
 # ==================================================================
-# 🔍 INLINE-РЕЖИМ — вопросы боту из любого чата
-# ==================================================================
-
-@dp.inline_query()
-async def inline_query_handler(inline_query: InlineQuery):
-    """Обработка inline-запросов @bot текст"""
-    uid   = inline_query.from_user.id
-    query = (inline_query.query or "").strip()
-
-    if not query:
-        results = [
-            InlineQueryResultArticle(
-                id="hint",
-                title=f"Задай вопрос {BOT_NAME}",
-                description="Напиши вопрос после @username бота",
-                input_message_content=InputTextMessageContent(
-                    message_text=f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> Напиши свой вопрос после @username бота',
-                    parse_mode="HTML"
-                ),
-            )
-        ]
-        await inline_query.answer(results, cache_time=10, is_personal=True)
-        return
-
-    bot_info = await bot.get_me()
-    deep_link = f"https://t.me/{bot_info.username}?start=q_{query[:50].replace(' ', '_')}"
-
-    answer_text = ""
-    if len(query) <= 200:
-        try:
-            _msgs = [
-                {"role": "system", "content": f"Ты — {BOT_NAME}. Отвечай ОЧЕНЬ кратко — 1-2 предложения max."},
-                {"role": "user", "content": query}
-            ]
-            answer_text = await asyncio.wait_for(
-                call_chat(_msgs, "claude_haiku", max_tokens=80),
-                timeout=3.5
-            )
-        except Exception:
-            pass
-
-    if answer_text:
-        preview = answer_text[:100] + ("..." if len(answer_text) > 100 else "")
-        full_msg = (
-            f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>{BOT_NAME}</b>\n\n'
-            f'<b>Вопрос:</b> {query}\n\n'
-            f'<b>Ответ:</b> {answer_text}\n\n'
-            f'<i>Открой бота для полного ответа и продолжения диалога 👇</i>'
-        )
-        results = [
-            InlineQueryResultArticle(
-                id=f"answer_{hash(query) % 100000}",
-                title=f"💬 {query[:60]}",
-                description=preview,
-                input_message_content=InputTextMessageContent(
-                    message_text=full_msg,
-                    parse_mode="HTML"
-                ),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text=f"Открыть {BOT_NAME}",
-                        url=deep_link
-                    )
-                ]])
-            )
-        ]
-    else:
-        full_msg = (
-            f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>{BOT_NAME}</b>\n\n'
-            f'<b>Вопрос:</b> {query}\n\n'
-            f'<i>Нажми кнопку ниже чтобы получить ответ в боте</i>'
-        )
-        results = [
-            InlineQueryResultArticle(
-                id=f"ask_{hash(query) % 100000}",
-                title=f"🤖 Спросить: {query[:50]}",
-                description=f"Получить ответ от {BOT_NAME}",
-                input_message_content=InputTextMessageContent(
-                    message_text=full_msg,
-                    parse_mode="HTML"
-                ),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(
-                        text=f"Открыть {BOT_NAME}",
-                        url=deep_link
-                    )
-                ]])
-            )
-        ]
-
-    await inline_query.answer(results, cache_time=30, is_personal=True)
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # 📦 CALLBACK-ОБРАБОТЧИКИ ДЛЯ ПАКЕТА ФОТ
 # ═══════════════════════════════════════════════════════════════════════════
@@ -21310,6 +21364,273 @@ async def photo_packet_custom_prompt_cb(callback: CallbackQuery):
         )
 
 
+
+# ══════════════════════════════════════════════════════════════
+# 🚫 ПАТЧ 2: /ban /unban команды + admin UI
+# ══════════════════════════════════════════════════════════════
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: Message):
+    """Забанить пользователя: /ban UID [причина]"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        return await message.answer("❌ Использование: /ban UID [причина]")
+    target = int(parts[1])
+    reason = parts[2] if len(parts) > 2 else "нарушение правил"
+    await db_ban_user(target, reason)
+    name = user_profiles.get(target, {}).get("name", str(target))
+    await message.answer(
+        f"🚫 <b>Пользователь заблокирован</b>\n\n"
+        f"👤 {name} (<code>{target}</code>)\n"
+        f"📝 Причина: {reason}",
+        parse_mode="HTML"
+    )
+
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: Message):
+    """Разбанить пользователя: /unban UID"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = (message.text or "").split()
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        return await message.answer("❌ Использование: /unban UID")
+    target = int(parts[1])
+    await db_unban_user(target)
+    await message.answer(f"✅ Пользователь <code>{target}</code> разбанен.", parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "admin_ban_menu")
+async def admin_ban_menu(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        return await callback.answer("❌ Нет доступа", show_alert=True)
+    await callback.answer()
+    ban_list = ", ".join(str(u) for u in list(banned_users)[:20]) or "нет"
+    await callback.message.edit_text(
+        f"🚫 <b>Управление банами</b>\n\n"
+        f"Забанено: <b>{len(banned_users)}</b> пользователей\n"
+        f"Последние: <code>{ban_list}</code>\n\n"
+        f"Команды:\n"
+        f"/ban UID [причина] — заблокировать\n"
+        f"/unban UID — разблокировать",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="◀️ Назад", callback_data="menu_admin")
+        ]])
+    )
+
+
+
+# ══════════════════════════════════════════════════════════════
+# 👍👎 ПАТЧ 4: ОЦЕНКА ОТВЕТОВ ИИ
+# ══════════════════════════════════════════════════════════════
+
+@dp.callback_query(F.data.startswith("feedback_"))
+async def handle_feedback(callback: CallbackQuery):
+    """Обработка оценки ответа (👍/👎)."""
+    parts = callback.data.split("_")
+    # feedback_up_MODELKEY or feedback_down_MODELKEY
+    if len(parts) < 3:
+        return await callback.answer()
+    vote = parts[1]  # "up" or "down"
+    model_key = "_".join(parts[2:])
+    uid = callback.from_user.id
+
+    emoji = "👍" if vote == "up" else "👎"
+    await callback.answer(f"{emoji} Спасибо за оценку!", show_alert=False)
+
+    # Сохраняем в model_stats
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                score = 1 if vote == "up" else -1
+                await conn.execute(
+                    "INSERT INTO model_stats (uid, model_key, tokens_in, tokens_out) VALUES ($1, $2, $3, 0)",
+                    uid, f"feedback_{vote}_{model_key}", score
+                )
+        except Exception as e:
+            logging.warning(f"feedback save: {e}")
+
+    # Убираем кнопки оценки из сообщения
+    try:
+        current_kb = callback.message.reply_markup
+        if current_kb:
+            # Оставляем все строки кроме строки с feedback кнопками
+            new_rows = [
+                row for row in current_kb.inline_keyboard
+                if not any(
+                    btn.callback_data and btn.callback_data.startswith("feedback_")
+                    for btn in row
+                )
+            ]
+            await callback.message.edit_reply_markup(
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=new_rows) if new_rows else None
+            )
+    except Exception:
+        pass
+
+
+
+# ══════════════════════════════════════════════════════════════
+# ❓ ПАТЧ 5: КОМАНДА /help
+# ══════════════════════════════════════════════════════════════
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message):
+    """Справка по боту."""
+    text = (
+        f'<tg-emoji emoji-id="{PE["bot"]}">🤖</tg-emoji> <b>Помощь — {BOT_NAME}</b>\n'
+        "━━━━━━━━━━━━━━━━━━━\n\n"
+        "<b>📌 Основные команды:</b>\n"
+        "/start — главное меню\n"
+        "/ai [вопрос] — задать вопрос ИИ\n"
+        "/img [описание] — сгенерировать картинку\n"
+        "/music [описание] — сгенерировать музыку\n"
+        "/model — выбрать модель ИИ\n"
+        "/clear — очистить память диалога\n"
+        "/tts — включить/выключить голосовые ответы\n\n"
+        "<b>📄 Документы:</b>\n"
+        "/report — написать реферат/доклад\n"
+        "/pptx — создать презентацию PowerPoint\n"
+        "/webpptx — создать веб-презентацию\n\n"
+        "<b>👤 Профиль:</b>\n"
+        "/profile — мой профиль\n"
+        "/stats — моя статистика\n"
+        "/export — экспорт истории диалогов\n"
+        "/ref — реферальная программа\n\n"
+        "<b>💡 Примеры вопросов:</b>\n"
+        "• Объясни квантовую физику простыми словами\n"
+        "• Напиши код на Python для парсинга сайта\n"
+        "• Переведи текст на английский\n"
+        "• Составь план тренировок на неделю\n\n"
+        "<b>🔍 Inline-режим:</b>\n"
+        f"Напиши <code>@iihuzandelpiibot вопрос</code> в любом чате — получи ответ ИИ прямо там!\n\n"
+        f'<i>Поддержка: @helphuza</i>'
+    )
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            AiogramInlineKeyboardButton(text="🏠 Главная", callback_data="back_home"),
+            AiogramInlineKeyboardButton(text="💬 Поддержка", url="https://t.me/helphuza"),
+        ]])
+    )
+
+
+
+# ══════════════════════════════════════════════════════════════
+# 👥 ПАТЧ 6: ГРУППОВОЙ РЕЖИМ
+# ══════════════════════════════════════════════════════════════
+
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def handle_group_message(message: Message, state: FSMContext):
+    """Обработка сообщений в группах — только при упоминании бота или ответе на его сообщение."""
+    bot_info = await bot.get_me()
+    bot_username = bot_info.username or ""
+    text = message.text or message.caption or ""
+    uid = message.from_user.id if message.from_user else 0
+
+    # Проверка: ответ на сообщение бота
+    is_reply_to_bot = (
+        message.reply_to_message and
+        message.reply_to_message.from_user and
+        message.reply_to_message.from_user.id == bot_info.id
+    )
+
+    # Проверка: упоминание @username бота
+    is_mention = bot_username and f"@{bot_username}" in text
+
+    if not is_reply_to_bot and not is_mention:
+        return  # игнорируем сообщение в группе без упоминания
+
+    # Убираем @username из текста запроса
+    query = text.replace(f"@{bot_username}", "").strip()
+    if not query:
+        return
+
+    if uid in banned_users:
+        return
+
+    # Используем модель пользователя
+    mk = resolve_model_key(uid, query)
+    if mk not in MODELS:
+        mk = "claude_haiku"
+
+    try:
+        async with ChatActionSender.typing(bot=bot, chat_id=message.chat.id):
+            _msgs = [
+                {"role": "system", "content": f"Ты — {BOT_NAME}. Отвечай кратко и по делу."},
+                {"role": "user", "content": query}
+            ]
+            ans = await asyncio.wait_for(
+                call_chat(_msgs, mk, max_tokens=800),
+                timeout=30
+            )
+        html_ans = md_to_html(ans)
+        await message.reply(html_ans[:4000], parse_mode="HTML")
+    except asyncio.TimeoutError:
+        await message.reply("⏳ Превышено время ожидания. Попробуй ещё раз.")
+    except Exception as e:
+        logging.warning(f"handle_group_message: {e}")
+        await message.reply(f"❌ Ошибка: {e}")
+
+
+
+# ══════════════════════════════════════════════════════════════
+# 📅 ПАТЧ 7: ЕЖЕДНЕВНЫЙ ПЛАНИРОВЩИК (дейли-дайджест)
+# ══════════════════════════════════════════════════════════════
+
+async def daily_scheduler():
+    """Запускается раз в сутки в 10:00 МСК — дейли-дайджест и уведомления."""
+    import datetime as _dt
+    while True:
+        try:
+            now = msk_now()
+            # Следующий запуск в 10:00
+            next_run = now.replace(hour=10, minute=0, second=0, microsecond=0)
+            if now >= next_run:
+                next_run += _dt.timedelta(days=1)
+            wait_secs = (next_run - now).total_seconds()
+            await asyncio.sleep(wait_secs)
+        except Exception:
+            await asyncio.sleep(3600)
+            continue
+
+        try:
+            now = msk_now()
+            deadline_1d = now + _dt.timedelta(days=1)
+            deadline_3d = now + _dt.timedelta(days=3)
+            sent = 0
+            for _uid, sub in list(user_subscriptions.items()):
+                expires = sub.get("expires")
+                if not expires or expires <= now:
+                    continue
+                days_left = (expires - now).days
+                # Уведомление за 1 день
+                if days_left == 0 and not sub.get("notified_1d"):
+                    try:
+                        await bot.send_message(
+                            _uid,
+                            premium_html(
+                                f"⚠️ <b>Подписка истекает СЕГОДНЯ!</b>\n\n"
+                                f"Продли прямо сейчас чтобы не потерять доступ."
+                            ),
+                            parse_mode="HTML",
+                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                                InlineKeyboardButton(text="💎 Продлить", callback_data="sub_menu")
+                            ]])
+                        )
+                        sub["notified_1d"] = True
+                        sent += 1
+                    except Exception:
+                        pass
+            logging.info(f"[daily_scheduler] Отправлено уведомлений: {sent}")
+        except Exception as e:
+            logging.warning(f"daily_scheduler error: {e}")
+
+
 async def main():
     global bot, redis_client, api_runner
 
@@ -21351,6 +21672,8 @@ async def main():
         await db_load_all_users()
         await db_load_subscriptions()
         await db_load_bot_settings()
+        await db_load_chat_history()  # ПАТЧ 1: персистентность истории
+        await db_load_banned()          # ПАТЧ 2: загружаем заблокированных
         await bot.delete_webhook(drop_pending_updates=True)
         # Закрываем старую сессию чтобы избежать TelegramConflictError
         try:
@@ -21381,6 +21704,7 @@ async def main():
             BotCommand(command="tts",     description="🔊 Включить/выключить голосовые ответы"),
             BotCommand(command="stats",   description="📊 Моя статистика"),
             BotCommand(command="export",  description="📁 Экспорт истории"),
+            BotCommand(command="help",    description="❓ Помощь и команды"),
         ], scope=BotCommandScopeDefault())
         # Устанавливаем кнопку "🤖 ХУЗА AI" слева в поле ввода (MenuButtonWebApp)
         try:
@@ -21396,6 +21720,7 @@ async def main():
         # ── Фоновые задачи ──
         track_background_task(asyncio.create_task(_background_refresh_limits()))
         track_background_task(asyncio.create_task(check_expiring_subs()))
+        track_background_task(asyncio.create_task(daily_scheduler()))  # ПАТЧ 7
         track_background_task(asyncio.create_task(_img_gen_worker()))
         track_background_task(asyncio.create_task(_cleanup_ip_windows()))
         # ── Запуск: Webhook или long polling (Задача 5) ──────────────────
@@ -21410,8 +21735,36 @@ async def main():
                 secret_token=WEBHOOK_SECRET or None,
             )
             logging.info(f"✅ Webhook установлен: {full_webhook}")
+            # ПАТЧ 11: проверяем что webhook принят Telegram
+            try:
+                wh_info = await bot.get_webhook_info()
+                if wh_info.last_error_message:
+                    err_msg = f"⚠️ Webhook ошибка: {wh_info.last_error_message}"
+                    logging.error(err_msg)
+                    for admin_id in ADMIN_IDS:
+                        try:
+                            await bot.send_message(admin_id, err_msg)
+                        except Exception:
+                            pass
+                else:
+                    logging.info(f"✅ Webhook OK, pending_update_count={wh_info.pending_update_count}")
+            except Exception as _wh_e:
+                logging.warning(f"get_webhook_info: {_wh_e}")
             while True:
                 await asyncio.sleep(3600)
+                # ПАТЧ 11: периодически проверяем здоровье webhook
+                try:
+                    wh_info = await bot.get_webhook_info()
+                    if wh_info.last_error_message:
+                        err_msg = f"⚠️ Webhook ошибка: {wh_info.last_error_message}"
+                        logging.error(err_msg)
+                        for admin_id in ADMIN_IDS:
+                            try:
+                                await bot.send_message(admin_id, err_msg)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
         else:
             logging.info("ℹ️ WEBHOOK_URL не задан — используется long polling")
             await dp.start_polling(bot)
