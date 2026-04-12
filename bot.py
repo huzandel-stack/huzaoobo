@@ -1223,8 +1223,8 @@ user_ref_earnings: dict = {}  # uid -> суммарный заработок с 
 user_history      = {}  # {uid: [{"q","a","model","ts"}]} — последние 10
 user_favorites: dict = {}  # uid -> [{"name": str, "text": str}]
 
-# ── Пробный период (3 дня при регистрации) ─────────────────
-TRIAL_DAYS = 3
+# ── Пробный период (1 день при регистрации) ─────────────────
+TRIAL_DAYS = 1
 _trial_given: set = set()  # uid которым уже выдан trial
 
 # ── Стрик активности ──────────────────────────────────────
@@ -21815,11 +21815,11 @@ async def cb_daily_bonus_menu(callback: CallbackQuery):
     sk = user_streak.get(uid, {"days": 0})
     streak_days = sk.get("days", 0)
     can = _can_claim_daily_bonus(uid)
+    import random as _bonus_random
     text = premium_html(
         "🎁 <b>Ежедневный бонус</b>\n\n"
-        f"🔥 Стрик: <b>{streak_days} дней</b>\n"
-        f"⚡ Бонус: <b>+{DAILY_BONUS_REQUESTS} запроса</b>\n\n"
-        "Заходи каждый день — на 7-й, 14-й и 30-й день бонусы!\n\n"
+        f"🔥 Стрик: <b>{streak_days} дней</b>\n\n"
+        "Каждые 24 часа получай от 1 до 3 запросов бесплатно!\n\n"
         + ("✅ <b>Бонус готов!</b> Забери ниже." if can else
            f"⏳ Следующий: <b>{_daily_bonus_remaining(uid)}</b>")
     )
@@ -21836,20 +21836,22 @@ async def cb_claim_daily_bonus(callback: CallbackQuery):
     if not _can_claim_daily_bonus(uid):
         await callback.answer(f"⏳ {_daily_bonus_remaining(uid)}", show_alert=True)
         return
+    import random as _rand
+    _claimed_bonus = _rand.randint(1, 3)
     _init_limits(uid)
-    user_limits[uid]["pro_used"] = max(0, user_limits[uid]["pro_used"] - DAILY_BONUS_REQUESTS)
+    user_limits[uid]["pro_used"] = max(0, user_limits[uid]["pro_used"] - _claimed_bonus)
     if uid not in user_profiles:
         user_profiles[uid] = {}
     user_profiles[uid]["last_bonus"] = msk_now()
     asyncio.create_task(_db_save_limits(uid))
     asyncio.create_task(db_save_user(uid, user_profiles.get(uid, {}).get("name", "")))
-    await callback.answer(f"🎉 +{DAILY_BONUS_REQUESTS} запроса получено!", show_alert=True)
+    await callback.answer(f"🎉 +{_claimed_bonus} запроса получено!", show_alert=True)
     sk = user_streak.get(uid, {"days": 0})
     text = premium_html(
         "🎁 <b>Бонус получен!</b>\n\n"
-        f"✅ <b>+{DAILY_BONUS_REQUESTS} запроса</b> начислено\n"
+        f"✅ <b>+{_claimed_bonus} запроса</b> начислено\n"
         f"🔥 Стрик: <b>{sk.get('days', 0)} дней</b>\n\n"
-        "Возвращайся завтра за следующим!"
+        "Возвращайся через 24 часа за следующим!"
     )
     try:
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
@@ -22201,11 +22203,7 @@ async def cb_onboard_finish(callback: CallbackQuery, state: FSMContext):
 
 # ── Аналитика /admin_charts ────────────────────────────────
 
-@dp.message(Command("admin_charts"))
-async def cmd_admin_charts(message: Message):
-    uid = message.from_user.id
-    if uid not in ADMIN_IDS:
-        return
+async def _send_admin_charts(message: Message, uid: int):
     if not db_pool:
         await message.answer("❌ БД недоступна")
         return
@@ -22305,14 +22303,22 @@ async def cmd_admin_charts(message: Message):
         await message.answer(f"❌ Ошибка: {e}")
 
 
+@dp.message(Command("admin_charts"))
+async def cmd_admin_charts(message: Message):
+    uid = message.from_user.id
+    if uid not in ADMIN_IDS:
+        return
+    await _send_admin_charts(message, uid)
+
+
 @dp.callback_query(F.data == "admin_charts_refresh")
 async def cb_admin_charts_refresh(callback: CallbackQuery):
     uid = callback.from_user.id
     if uid not in ADMIN_IDS:
-        await callback.answer()
+        await callback.answer("Нет доступа", show_alert=True)
         return
     await callback.answer("Обновляю...")
-    await cmd_admin_charts(callback.message)
+    await _send_admin_charts(callback.message, uid)
 
 
 # ── Реферальная ссылка (обновлённая с доходами) ────────────
